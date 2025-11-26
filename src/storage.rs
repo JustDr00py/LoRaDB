@@ -280,7 +280,7 @@ impl StorageEngine {
         info!("Starting frame processor");
 
         while let Some(frame) = frame_rx.recv().await {
-            let dev_eui = frame.dev_eui().as_str();
+            let dev_eui = frame.dev_eui().as_str().to_string();
             match self.write(frame).await {
                 Ok(_) => {
                     info!("Successfully stored frame for device {}", dev_eui);
