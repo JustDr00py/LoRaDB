@@ -41,8 +41,11 @@ impl QueryExecutor {
                 // Serialize frame to JSON
                 let json = serde_json::to_value(frame).unwrap_or(serde_json::json!({}));
 
+                // Unwrap enum variant for easier querying (e.g., {"Uplink": {...}} -> {...})
+                let unwrapped_json = self.unwrap_frame_variant(json);
+
                 // Apply field projection if needed
-                self.project_fields(json, &query.select)
+                self.project_fields(unwrapped_json, &query.select)
             })
             .collect();
 
@@ -73,15 +76,62 @@ impl QueryExecutor {
         }
     }
 
-    /// Project specific fields from JSON
-    fn project_fields(&self, mut json: serde_json::Value, select: &SelectClause) -> serde_json::Value {
+    /// Project specific fields from JSON with support for nested paths (dot notation)
+    fn project_fields(&self, json: serde_json::Value, select: &SelectClause) -> serde_json::Value {
         if let SelectClause::Fields(fields) = select {
-            if let serde_json::Value::Object(ref mut map) = json {
-                // Keep only requested fields
-                map.retain(|key, _| fields.contains(&key.to_string()));
+            let mut result = serde_json::Map::new();
+
+            for field in fields {
+                // Check if this is a nested path (contains dots)
+                if field.contains('.') {
+                    // Extract nested value
+                    if let Some(value) = self.get_nested_field(&json, field) {
+                        // For nested paths, use the full path as the key
+                        result.insert(field.clone(), value.clone());
+                    }
+                } else {
+                    // Top-level field access
+                    if let serde_json::Value::Object(ref map) = json {
+                        if let Some(value) = map.get(field) {
+                            result.insert(field.clone(), value.clone());
+                        }
+                    }
+                }
             }
+
+            serde_json::Value::Object(result)
+        } else {
+            json
         }
-        json
+    }
+
+    /// Get a nested field using dot notation (e.g., "decoded_payload.co2")
+    fn get_nested_field<'a>(&self, json: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        let mut current = json;
+        for segment in path.split('.') {
+            current = current.get(segment)?;
+        }
+        Some(current)
+    }
+
+    /// Unwrap Frame enum variant to make querying easier
+    /// Converts {"Uplink": {...}} to {...} while preserving the frame type as a field
+    fn unwrap_frame_variant(&self, json: serde_json::Value) -> serde_json::Value {
+        if let serde_json::Value::Object(map) = json {
+            // Frame enum has exactly one key (the variant name)
+            if map.len() == 1 {
+                if let Some((variant_name, variant_value)) = map.iter().next() {
+                    if let serde_json::Value::Object(mut inner_map) = variant_value.clone() {
+                        // Add frame_type field to indicate which variant this was
+                        inner_map.insert("frame_type".to_string(), serde_json::json!(variant_name));
+                        return serde_json::Value::Object(inner_map);
+                    }
+                }
+            }
+            serde_json::Value::Object(map)
+        } else {
+            json
+        }
     }
 }
 
@@ -228,5 +278,180 @@ mod tests {
 
         let result = executor.execute(&query).await.unwrap();
         assert_eq!(result.total_frames, 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_query_with_nested_fields() {
+        use crate::model::decoded::DecodedPayload;
+        use serde_json::json;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(temp_dir.path());
+        let storage = Arc::new(StorageEngine::new(config).await.unwrap());
+        let executor = QueryExecutor::new(storage.clone());
+
+        // Create uplink with decoded payload containing measurements
+        let dev_eui_str = "0123456789ABCDEF";
+        let decoded = DecodedPayload::from_json(json!({
+            "co2": 450,
+            "TempC_SHT": 22.5,
+            "humidity": 65.0,
+            "sensor": {
+                "voltage": 3.7,
+                "status": "ok"
+            }
+        }));
+
+        let frame = Frame::Uplink(UplinkFrame {
+            dev_eui: DevEui::new(dev_eui_str.to_string()).unwrap(),
+            application_id: ApplicationId::new("test-app".to_string()),
+            device_name: Some("test-device".to_string()),
+            received_at: Utc::now(),
+            f_port: 1,
+            f_cnt: 42,
+            confirmed: false,
+            adr: true,
+            dr: DataRate::new_lora(125000, 7),
+            frequency: 868100000,
+            rx_info: vec![],
+            decoded_payload: Some(decoded),
+            raw_payload: None,
+        });
+
+        storage.write(frame).await.unwrap();
+
+        // Query with nested field paths (now simplified without "Uplink" prefix)
+        let query = Query::new(
+            SelectClause::Fields(vec![
+                "decoded_payload.object.co2".to_string(),
+                "decoded_payload.object.TempC_SHT".to_string(),
+                "decoded_payload.object.sensor.voltage".to_string(),
+            ]),
+            FromClause {
+                dev_eui: dev_eui_str.to_string(),
+            },
+            None,
+        );
+
+        let result = executor.execute(&query).await.unwrap();
+        assert_eq!(result.total_frames, 1);
+
+        // Verify the projected fields
+        let frame_json = &result.frames[0];
+        assert_eq!(frame_json["decoded_payload.object.co2"], json!(450));
+        assert_eq!(frame_json["decoded_payload.object.TempC_SHT"], json!(22.5));
+        assert_eq!(frame_json["decoded_payload.object.sensor.voltage"], json!(3.7));
+
+        // Verify other fields are not included
+        assert!(frame_json.get("f_port").is_none());
+        assert!(frame_json.get("decoded_payload.object.humidity").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_query_mixed_top_level_and_nested_fields() {
+        use crate::model::decoded::DecodedPayload;
+        use serde_json::json;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(temp_dir.path());
+        let storage = Arc::new(StorageEngine::new(config).await.unwrap());
+        let executor = QueryExecutor::new(storage.clone());
+
+        let dev_eui_str = "0123456789ABCDEF";
+        let decoded = DecodedPayload::from_json(json!({
+            "temperature": 25.0,
+        }));
+
+        let frame = Frame::Uplink(UplinkFrame {
+            dev_eui: DevEui::new(dev_eui_str.to_string()).unwrap(),
+            application_id: ApplicationId::new("test-app".to_string()),
+            device_name: Some("sensor-1".to_string()),
+            received_at: Utc::now(),
+            f_port: 2,
+            f_cnt: 100,
+            confirmed: false,
+            adr: true,
+            dr: DataRate::new_lora(125000, 7),
+            frequency: 868100000,
+            rx_info: vec![],
+            decoded_payload: Some(decoded),
+            raw_payload: None,
+        });
+
+        storage.write(frame).await.unwrap();
+
+        // Query mixing top-level and nested fields
+        let query = Query::new(
+            SelectClause::Fields(vec![
+                "f_port".to_string(),
+                "f_cnt".to_string(),
+                "decoded_payload.object.temperature".to_string(),
+            ]),
+            FromClause {
+                dev_eui: dev_eui_str.to_string(),
+            },
+            None,
+        );
+
+        let result = executor.execute(&query).await.unwrap();
+        assert_eq!(result.total_frames, 1);
+
+        let frame_json = &result.frames[0];
+        assert_eq!(frame_json["f_port"], json!(2));
+        assert_eq!(frame_json["f_cnt"], json!(100));
+        assert_eq!(frame_json["decoded_payload.object.temperature"], json!(25.0));
+
+        // Verify device_name is excluded
+        assert!(frame_json.get("device_name").is_none());
+    }
+
+    #[test]
+    fn test_get_nested_field() {
+        use serde_json::json;
+
+        let storage = Arc::new(
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async {
+                    let temp_dir = TempDir::new().unwrap();
+                    let config = create_test_config(temp_dir.path());
+                    StorageEngine::new(config).await.unwrap()
+                })
+        );
+        let executor = QueryExecutor::new(storage);
+
+        let json = json!({
+            "level1": {
+                "level2": {
+                    "level3": "deep_value"
+                },
+                "value": 42
+            },
+            "top": "top_value"
+        });
+
+        // Test deeply nested path
+        assert_eq!(
+            executor.get_nested_field(&json, "level1.level2.level3"),
+            Some(&json!("deep_value"))
+        );
+
+        // Test two-level path
+        assert_eq!(
+            executor.get_nested_field(&json, "level1.value"),
+            Some(&json!(42))
+        );
+
+        // Test top-level path
+        assert_eq!(
+            executor.get_nested_field(&json, "top"),
+            Some(&json!("top_value"))
+        );
+
+        // Test non-existent path
+        assert_eq!(
+            executor.get_nested_field(&json, "level1.nonexistent"),
+            None
+        );
     }
 }

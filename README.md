@@ -22,11 +22,19 @@ LoRaDB is a specialized database built from scratch in Rust for storing and quer
 - **Message Parsing**: JSON deserialization with validation
 
 ### Query DSL
-Simple SQL-like query language:
+Simple SQL-like query language with nested field projection:
 ```sql
+-- Query all uplink data
 SELECT * FROM device '0123456789ABCDEF' WHERE LAST '1h'
+
+-- Query specific frame types
 SELECT uplink FROM device '0123456789ABCDEF' WHERE SINCE '2025-01-01T00:00:00Z'
-SELECT f_port, f_cnt, rssi FROM device 'ABCD' WHERE BETWEEN '2025-01-01T00:00:00Z' AND '2025-01-02T00:00:00Z'
+
+-- Query specific measurements using dot notation
+SELECT decoded_payload.object.co2, decoded_payload.object.TempC_SHT FROM device '0123456789ABCDEF' WHERE LAST '24h'
+
+-- Mix frame metadata and sensor measurements
+SELECT received_at, f_port, decoded_payload.object.temperature FROM device '0123456789ABCDEF' WHERE LAST '7d'
 ```
 
 ### HTTP/HTTPS API

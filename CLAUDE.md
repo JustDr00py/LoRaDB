@@ -106,8 +106,11 @@ cargo run
 **Query System** (`src/query/`):
 - `parser.rs`: Hand-written recursive descent parser for query DSL
 - `dsl.rs`: AST representation (SELECT, FROM, WHERE, time ranges)
-- `executor.rs`: Query execution against memtable + SSTables
-- Query DSL syntax: `SELECT * FROM device 'DEV_EUI' WHERE LAST '1h'`
+- `executor.rs`: Query execution against memtable + SSTables with nested field projection
+- Query DSL syntax examples:
+  - `SELECT * FROM device 'DEV_EUI' WHERE LAST '1h'`
+  - `SELECT decoded_payload.object.co2, decoded_payload.object.TempC_SHT FROM device 'DEV_EUI' WHERE LAST '24h'`
+  - `SELECT f_port, f_cnt, decoded_payload.object.temperature FROM device 'DEV_EUI' WHERE SINCE '2025-01-01T00:00:00Z'`
 
 **API Layer** (`src/api/`):
 - `http.rs`: Axum HTTP server with optional TLS (use reverse proxy in production)
@@ -124,6 +127,75 @@ cargo run
 - `lorawan.rs`: DevEui, AppEui, LoRaWAN metadata types
 - `device.rs`: `DeviceRegistry` using `DashMap` for concurrent device tracking
 - `gateway.rs`: Gateway metadata structures
+
+## Querying Decoded Payload Measurements
+
+The query system supports nested field projection using dot notation, making it easy to extract specific measurements from uplink frames:
+
+### Basic Query Syntax
+
+```sql
+-- Query all uplink frames
+SELECT uplink FROM device '0123456789ABCDEF' WHERE LAST '1h'
+
+-- Query specific measurements using dot notation
+SELECT decoded_payload.object.co2, decoded_payload.object.TempC_SHT FROM device '0123456789ABCDEF' WHERE LAST '24h'
+
+-- Mix top-level frame fields with nested measurements
+SELECT received_at, f_port, f_cnt, decoded_payload.object.temperature FROM device '0123456789ABCDEF' WHERE LAST '7d'
+
+-- Query deeply nested fields
+SELECT decoded_payload.object.sensor.voltage, decoded_payload.object.sensor.status FROM device '0123456789ABCDEF'
+```
+
+### Field Path Structure
+
+After deserialization, frames have the following structure (enum variant is unwrapped automatically):
+```json
+{
+  "frame_type": "Uplink",
+  "dev_eui": "0123456789ABCDEF",
+  "f_port": 1,
+  "f_cnt": 42,
+  "received_at": "2025-01-26T12:00:00Z",
+  "decoded_payload": {
+    "object": {
+      "co2": 450,
+      "TempC_SHT": 22.5,
+      "humidity": 65.0
+    }
+  }
+}
+```
+
+To query specific measurements, use paths like:
+- `decoded_payload.object.co2` - Direct measurement field
+- `decoded_payload.object.sensor.voltage` - Nested sensor field
+- `f_port` - Top-level frame metadata
+
+### Query Result Format
+
+When using field projection, results include only the requested fields:
+```json
+{
+  "dev_eui": "0123456789ABCDEF",
+  "total_frames": 10,
+  "frames": [
+    {
+      "decoded_payload.object.co2": 450,
+      "decoded_payload.object.TempC_SHT": 22.5,
+      "received_at": "2025-01-26T12:00:00Z"
+    }
+  ]
+}
+```
+
+### Implementation Notes
+
+- Nested field extraction uses `query/executor.rs:get_nested_field()`
+- Frame enum variants are automatically unwrapped for easier querying
+- Non-existent fields are silently omitted from results
+- The `DecodedPayload.object` field contains the arbitrary JSON from the network server decoder
 
 ## Important Implementation Details
 
