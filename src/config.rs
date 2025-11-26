@@ -42,6 +42,7 @@ pub struct ApiConfig {
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub jwt_secret: String,
+    pub jwt_expiration_hours: i64,
     pub rate_limit_per_minute: u32,
 }
 
@@ -125,6 +126,10 @@ impl Config {
             },
             jwt_secret: env::var("LORADB_API_JWT_SECRET").context(
                 "LORADB_API_JWT_SECRET must be set",
+            )?,
+            jwt_expiration_hours: parse_env(
+                "LORADB_API_JWT_EXPIRATION_HOURS",
+                1,
             )?,
             rate_limit_per_minute: parse_env(
                 "LORADB_API_RATE_LIMIT_PER_MINUTE",

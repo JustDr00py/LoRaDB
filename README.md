@@ -186,6 +186,7 @@ LORADB_STORAGE_ENABLE_ENCRYPTION=true
 LORADB_STORAGE_ENCRYPTION_KEY=base64-encoded-32-byte-key
 
 # API Tuning
+LORADB_API_JWT_EXPIRATION_HOURS=1  # JWT token expiration in hours (default: 1)
 LORADB_API_RATE_LIMIT_PER_MINUTE=100
 ```
 
@@ -231,11 +232,18 @@ export LORADB_API_JWT_SECRET="your-32-character-secret-key-here"
 
 # Or pass JWT secret directly
 ./target/release/generate-token admin "your-32-character-secret-key-here"
+
+# Generate token with custom expiration (in hours)
+export LORADB_API_JWT_EXPIRATION_HOURS=24  # 24 hours
+./target/release/generate-token admin
+
+# Or pass expiration as third argument
+./target/release/generate-token admin "your-jwt-secret" 24
 ```
 
 #### Token Details
 - **Algorithm**: HS256 (HMAC with SHA-256)
-- **Expiration**: 1 hour from generation
+- **Expiration**: Configurable via `LORADB_API_JWT_EXPIRATION_HOURS` (default: 1 hour)
 - **Claims**: Contains `sub` (username), `exp` (expiration), and `iat` (issued at)
 - **Usage**: Include in API requests via `Authorization: Bearer <token>` header
 

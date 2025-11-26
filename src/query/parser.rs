@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 /// Parse a query string into a Query AST
 ///
 /// Grammar:
-/// ```
+/// ```text
 /// Query     := SELECT SelectClause FROM FromClause [ WHERE FilterClause ]
 /// SelectClause := * | uplink | downlink | join | Fields
 /// FromClause := device 'DevEUI'

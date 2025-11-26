@@ -21,8 +21,13 @@ pub struct Claims {
 impl Claims {
     /// Create new claims with default expiration (1 hour)
     pub fn new(user_id: String) -> Self {
+        Self::with_expiration_hours(user_id, 1)
+    }
+
+    /// Create new claims with custom expiration in hours
+    pub fn with_expiration_hours(user_id: String, hours: i64) -> Self {
         let now = Utc::now();
-        let exp = now + Duration::hours(1);
+        let exp = now + Duration::hours(hours);
 
         Self {
             sub: user_id,

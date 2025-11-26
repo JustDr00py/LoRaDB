@@ -151,6 +151,7 @@ mod tests {
             tls_cert: None,
             tls_key: None,
             jwt_secret: "this-is-a-very-secure-secret-key-for-testing".to_string(),
+            jwt_expiration_hours: 1,
             rate_limit_per_minute: 100,
         };
 
