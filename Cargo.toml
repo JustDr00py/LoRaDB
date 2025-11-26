@@ -101,3 +101,7 @@ harness = false
 [[bench]]
 name = "query_bench"
 harness = false
+
+[[bin]]
+name = "generate-token"
+path = "src/bin/generate-token.rs"
