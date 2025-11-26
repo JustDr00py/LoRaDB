@@ -209,6 +209,12 @@ impl MqttIngestor {
                     // Parse message
                     match parser.parse_message(&publish.topic, &publish.payload) {
                         Ok(Some(frame)) => {
+                            // Log successful parse
+                            info!(
+                                "{} MQTT: Successfully parsed message for device {} on topic '{}'",
+                                name, frame.dev_eui().as_str(), publish.topic
+                            );
+
                             // Send frame to processing pipeline
                             if let Err(e) = frame_tx.send(frame).await {
                                 error!("{} MQTT: Failed to send frame to pipeline: {}", name, e);
@@ -216,7 +222,7 @@ impl MqttIngestor {
                         }
                         Ok(None) => {
                             // Message was filtered (e.g., not an uplink)
-                            debug!("{} MQTT: Message filtered", name);
+                            debug!("{} MQTT: Message filtered on topic '{}'", name, publish.topic);
                         }
                         Err(e) => {
                             // Log the error with payload preview for debugging
