@@ -107,8 +107,9 @@ impl HttpServer {
                 self.bind_addr
             );
 
-            let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
-            axum::serve(listener, app).await?;
+            axum_server::bind(self.bind_addr)
+                .serve(app.into_make_service())
+                .await?;
         }
 
         Ok(())
