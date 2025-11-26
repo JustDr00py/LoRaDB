@@ -29,10 +29,10 @@ SELECT uplink FROM device '0123456789ABCDEF' WHERE SINCE '2025-01-01T00:00:00Z'
 SELECT f_port, f_cnt, rssi FROM device 'ABCD' WHERE BETWEEN '2025-01-01T00:00:00Z' AND '2025-01-02T00:00:00Z'
 ```
 
-### HTTPS API
+### HTTP/HTTPS API
 - **JWT Authentication**: HS256 tokens with 1-hour expiration
 - **Security Headers**: HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
-- **TLS-Only**: axum-server with rustls
+- **TLS Support**: Optional built-in TLS (use reverse proxy recommended for production)
 - **RESTful Endpoints**:
   - `GET /health` - Health check (no auth)
   - `POST /query` - Execute queries (JWT required)
@@ -46,7 +46,7 @@ SELECT f_port, f_cnt, rssi FROM device 'ABCD' WHERE BETWEEN '2025-01-01T00:00:00
 #### Prerequisites
 - Docker 20.10+
 - Docker Compose 2.0+
-- TLS certificates for HTTPS
+- (Optional) Reverse proxy like Caddy or nginx for production HTTPS
 
 #### Quick Start with Docker Compose
 
@@ -63,39 +63,30 @@ cp .env.example .env
 
 3. **Edit `.env` with your configuration**
 ```bash
-# Required: Update these values
-LORADB_TLS_CERT_PATH=/absolute/path/to/your/cert.pem
-LORADB_TLS_KEY_PATH=/absolute/path/to/your/key.pem
+# Required: Generate a secure JWT secret
 LORADB_API_JWT_SECRET=$(openssl rand -base64 32)
 
-# Optional: Configure MQTT brokers
+# Required: Configure MQTT broker (ChirpStack or TTN)
 LORADB_MQTT_CHIRPSTACK_BROKER=mqtts://chirpstack.example.com:8883
 LORADB_MQTT_USERNAME=loradb
 LORADB_MQTT_PASSWORD=your-password
+
+# Optional: Use reverse proxy for HTTPS (recommended)
+LORADB_API_BIND_ADDR=0.0.0.0:8080
+LORADB_API_ENABLE_TLS=false
 ```
 
-4. **Generate TLS certificates** (if you don't have them)
-```bash
-# Self-signed certificate for testing (NOT for production)
-openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes \
-  -subj "/CN=localhost"
-
-# Update paths in .env
-LORADB_TLS_CERT_PATH=$(pwd)/cert.pem
-LORADB_TLS_KEY_PATH=$(pwd)/key.pem
-```
-
-5. **Start the container**
+4. **Start the container**
 ```bash
 docker-compose up -d
 ```
 
-6. **View logs**
+5. **View logs**
 ```bash
 docker-compose logs -f loradb
 ```
 
-7. **Stop the container**
+6. **Stop the container**
 ```bash
 docker-compose down
 ```
@@ -103,6 +94,27 @@ docker-compose down
 #### Docker Resource Requirements
 - **Minimum**: 512MB RAM, 1 CPU core, 10GB disk
 - **Recommended**: 2GB RAM, 2 CPU cores, 50GB+ SSD
+
+#### Using Reverse Proxy (Recommended for Production)
+
+For production deployments, use a reverse proxy like Caddy or nginx to handle HTTPS:
+
+**With Caddy (automatic HTTPS):**
+```bash
+# Update .env
+LORADB_API_BIND_ADDR=0.0.0.0:8080
+LORADB_API_ENABLE_TLS=false
+
+# Caddy will automatically obtain Let's Encrypt certificates
+# and proxy to LoRaDB on port 8080
+```
+
+**Benefits:**
+- ✅ Automatic HTTPS with Let's Encrypt
+- ✅ Certificate renewal handled by Caddy
+- ✅ Easier configuration
+- ✅ Better performance for static assets
+- ✅ Additional security features (rate limiting, etc.)
 
 #### Data Persistence
 Data is persisted in the `loradb-data` Docker volume. To back up your data:
@@ -145,10 +157,13 @@ LoRaDB is configured via environment variables or a `.env` file:
 LORADB_STORAGE_DATA_DIR=/var/lib/loradb/data
 
 # API
-LORADB_API_BIND_ADDR=0.0.0.0:8443
-LORADB_API_TLS_CERT=/path/to/cert.pem
-LORADB_API_TLS_KEY=/path/to/key.pem
+LORADB_API_BIND_ADDR=0.0.0.0:8080
 LORADB_API_JWT_SECRET=your-32-character-secret-here!!!
+
+# TLS Configuration (optional - use reverse proxy like Caddy/nginx for production)
+LORADB_API_ENABLE_TLS=false  # Set to true for direct HTTPS
+# LORADB_API_TLS_CERT=/path/to/cert.pem  # Only needed if ENABLE_TLS=true
+# LORADB_API_TLS_KEY=/path/to/key.pem    # Only needed if ENABLE_TLS=true
 ```
 
 ### Optional Variables
@@ -188,16 +203,41 @@ export LORADB_API_JWT_SECRET=your-secret-key-at-least-32-chars
 ```
 
 ### Generate JWT Token
+
+LoRaDB includes a built-in token generator tool for easy authentication.
+
+#### Using Docker
 ```bash
-# Using a JWT library or online tool
-# Example payload:
-{
-  "sub": "admin-user",
-  "exp": 1735689600,  # Unix timestamp
-  "iat": 1735686000,
-  "role": "admin"
-}
+# Generate a token for a user
+docker compose exec loradb generate-token admin
+
+# Output example:
+# Generated JWT token for user 'admin':
+#
+# eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...
+#
+# Use this token in API requests:
+# curl -H 'Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...' https://your-domain.com/devices
 ```
+
+#### Using Native Binary
+```bash
+# Build the token generator
+cargo build --release --bin generate-token
+
+# Generate token using JWT secret from environment
+export LORADB_API_JWT_SECRET="your-32-character-secret-key-here"
+./target/release/generate-token admin
+
+# Or pass JWT secret directly
+./target/release/generate-token admin "your-32-character-secret-key-here"
+```
+
+#### Token Details
+- **Algorithm**: HS256 (HMAC with SHA-256)
+- **Expiration**: 1 hour from generation
+- **Claims**: Contains `sub` (username), `exp` (expiration), and `iat` (issued at)
+- **Usage**: Include in API requests via `Authorization: Bearer <token>` header
 
 ### Query via API
 ```bash
