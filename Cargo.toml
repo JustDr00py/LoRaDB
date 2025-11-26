@@ -2,7 +2,7 @@
 name = "loradb"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.80"
 authors = ["LoRaDB Team"]
 description = "Secure, high-performance time-series database for LoRaWAN devices"
 license = "MIT OR Apache-2.0"
