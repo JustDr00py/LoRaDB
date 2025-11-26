@@ -373,6 +373,19 @@ impl SSTableReader {
         &self.metadata
     }
 
+    /// Iterate over all frames in this SSTable
+    /// Used for rebuilding device registry on startup
+    pub fn iter_all(&self) -> Result<Vec<Frame>> {
+        let mut results = Vec::new();
+
+        for entry in &self.index {
+            let frame = self.read_frame(entry)?;
+            results.push(frame);
+        }
+
+        Ok(results)
+    }
+
     /// Scan for entries matching a device and time range
     pub fn scan(
         &self,

@@ -66,13 +66,63 @@ impl StorageEngine {
             compaction_manager.next_sstable_id()
         );
 
+        // Initialize device registry
+        let device_registry = Arc::new(DeviceRegistry::new());
+
+        // Rebuild device registry from existing data
+        info!("Rebuilding device registry from stored data...");
+        let mut device_count = 0;
+
+        // Register devices from SSTables
+        for sstable in &sstables {
+            if let Ok(frames) = sstable.iter_all() {
+                for frame in frames {
+                    device_registry.register_or_update(
+                        frame.dev_eui().clone(),
+                        match &frame {
+                            Frame::Uplink(f) => f.device_name.clone(),
+                            Frame::Downlink(_) => None,
+                            _ => None,
+                        },
+                        frame
+                            .application_id()
+                            .map(|id| id.as_str().to_string())
+                            .unwrap_or_default(),
+                    );
+                    device_count += 1;
+                }
+            }
+        }
+
+        // Register devices from memtable (already recovered from WAL)
+        for (_key, frame) in memtable.iter() {
+            device_registry.register_or_update(
+                frame.dev_eui().clone(),
+                match &frame {
+                    Frame::Uplink(f) => f.device_name.clone(),
+                    Frame::Downlink(_) => None,
+                    _ => None,
+                },
+                frame
+                    .application_id()
+                    .map(|id| id.as_str().to_string())
+                    .unwrap_or_default(),
+            );
+        }
+
+        info!(
+            "Device registry rebuilt: {} unique devices from {} total frames",
+            device_registry.device_count(),
+            device_count
+        );
+
         Ok(Self {
             data_dir,
             wal: Arc::new(RwLock::new(wal)),
             memtable: Arc::new(RwLock::new(memtable)),
             sstables: Arc::new(RwLock::new(sstables)),
             compaction_manager: Arc::new(RwLock::new(compaction_manager)),
-            device_registry: Arc::new(DeviceRegistry::new()),
+            device_registry,
             config,
         })
     }
@@ -399,5 +449,54 @@ mod tests {
         let engine = StorageEngine::new(config).await.unwrap();
         let results = engine.query(&dev_eui, None, None).await.unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_device_registry_persistence() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(temp_dir.path());
+
+        let dev_eui1 = "0123456789ABCDEF";
+        let dev_eui2 = "FEDCBA9876543210";
+        let now = Utc::now();
+
+        // Write frames for multiple devices, then shutdown with flush
+        {
+            let engine = StorageEngine::new(config.clone()).await.unwrap();
+
+            // Write frames for device 1
+            for i in 0..2 {
+                let frame = create_test_frame(dev_eui1, now + chrono::Duration::seconds(i));
+                engine.write(frame).await.unwrap();
+            }
+
+            // Write frames for device 2
+            for i in 0..2 {
+                let frame = create_test_frame(dev_eui2, now + chrono::Duration::seconds(i));
+                engine.write(frame).await.unwrap();
+            }
+
+            // Verify device registry has both devices
+            assert_eq!(engine.device_registry().device_count(), 2);
+
+            // Gracefully shutdown (flush memtable to SSTable)
+            engine.shutdown().await.unwrap();
+        }
+
+        // Reopen and verify device registry is rebuilt from SSTables
+        let engine = StorageEngine::new(config).await.unwrap();
+
+        // Device registry should have both devices
+        assert_eq!(engine.device_registry().device_count(), 2);
+
+        // Verify we can get device info
+        let device1 = engine.device_registry()
+            .get(&DevEui::new(dev_eui1.to_string()).unwrap());
+        assert!(device1.is_some());
+        assert_eq!(device1.unwrap().device_name, Some("test-device".to_string()));
+
+        let device2 = engine.device_registry()
+            .get(&DevEui::new(dev_eui2.to_string()).unwrap());
+        assert!(device2.is_some());
     }
 }
