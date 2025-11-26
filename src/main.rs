@@ -1,0 +1,110 @@
+use loradb::api::http::HttpServer;
+use loradb::config::Config;
+use loradb::ingest::mqtt::{BrokerConfig, MqttIngestor};
+use loradb::security::jwt::JwtService;
+use loradb::storage::StorageEngine;
+use anyhow::Result;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::{error, info};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("loradb=info".parse()?)
+        )
+        .json()
+        .init();
+
+    info!("Starting LoRaDB v{}", loradb::VERSION);
+
+    // Load configuration
+    let config = Config::from_env()?;
+    config.validate()?;
+
+    info!("Configuration loaded successfully");
+
+    // Initialize storage engine
+    info!("Initializing storage engine at {}", config.storage.data_dir.display());
+    let storage = Arc::new(StorageEngine::new(config.storage.clone()).await?);
+    info!("Storage engine initialized");
+
+    // Initialize JWT service
+    info!("Initializing JWT authentication");
+    let jwt_service = Arc::new(JwtService::new(&config.api.jwt_secret)?);
+
+    // Initialize HTTP server
+    info!("Initializing HTTPS API server on {}", config.api.bind_addr);
+    let http_server = HttpServer::new(
+        storage.clone(),
+        jwt_service,
+        config.api.clone(),
+    );
+
+    // Create channel for MQTT -> Storage communication
+    let (frame_tx, frame_rx) = mpsc::channel(1000);
+
+    // Start frame processor in background
+    let storage_clone = storage.clone();
+    let processor_handle = tokio::spawn(async move {
+        storage_clone.start_frame_processor(frame_rx).await;
+    });
+
+    // Initialize MQTT ingestion
+    let mqtt_handle = if config.mqtt.chirpstack_broker.is_some() || config.mqtt.ttn_broker.is_some() {
+        info!("Initializing MQTT ingestion");
+
+        let chirpstack_broker = config.mqtt.chirpstack_broker.clone().map(|url| BrokerConfig {
+            broker_url: url,
+            topic_prefix: "application/+/device/+/event".to_string(),
+        });
+
+        let ttn_broker = config.mqtt.ttn_broker.clone().map(|url| BrokerConfig {
+            broker_url: url,
+            topic_prefix: "v3/+/devices/+".to_string(),
+        });
+
+        let mqtt_ingestor = MqttIngestor::new(
+            config.mqtt.clone(),
+            chirpstack_broker,
+            ttn_broker,
+            frame_tx,
+        );
+
+        Some(tokio::spawn(async move {
+            if let Err(e) = mqtt_ingestor.start().await {
+                error!("MQTT ingestion error: {}", e);
+            }
+        }))
+    } else {
+        info!("MQTT ingestion disabled (no brokers configured)");
+        None
+    };
+
+    info!("LoRaDB started successfully");
+
+    // Start HTTP server in background
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = http_server.serve().await {
+            error!("HTTP server error: {}", e);
+        }
+    });
+
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
+    info!("Shutdown signal received, shutting down gracefully...");
+
+    // Cancel background tasks
+    server_handle.abort();
+    processor_handle.abort();
+    if let Some(handle) = mqtt_handle {
+        handle.abort();
+    }
+
+    info!("LoRaDB shutdown complete");
+
+    Ok(())
+}
