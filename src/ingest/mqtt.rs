@@ -219,7 +219,17 @@ impl MqttIngestor {
                             debug!("{} MQTT: Message filtered", name);
                         }
                         Err(e) => {
-                            warn!("{} MQTT: Failed to parse message: {}", name, e);
+                            // Log the error with payload preview for debugging
+                            let payload_preview = String::from_utf8_lossy(&publish.payload);
+                            let preview = if payload_preview.len() > 500 {
+                                format!("{}...", &payload_preview[..500])
+                            } else {
+                                payload_preview.to_string()
+                            };
+                            warn!(
+                                "{} MQTT: Failed to parse message on topic '{}': {} | Payload: {}",
+                                name, publish.topic, e, preview
+                            );
                         }
                     }
                 }
