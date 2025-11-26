@@ -293,6 +293,31 @@ impl StorageEngine {
 
         warn!("Frame processor stopped");
     }
+
+    /// Gracefully shut down storage engine by flushing memtable to SSTable
+    pub async fn shutdown(&self) -> Result<()> {
+        info!("Shutting down storage engine");
+
+        // Check if memtable has any data to flush
+        let has_data = {
+            let memtable = self.memtable.read().await;
+            !memtable.is_empty()
+        };
+
+        if has_data {
+            info!("Flushing memtable before shutdown");
+            self.flush_memtable().await?;
+        }
+
+        // Sync WAL to ensure all data is written
+        {
+            let wal = self.wal.read().await;
+            wal.sync()?;
+        }
+
+        info!("Storage engine shutdown complete");
+        Ok(())
+    }
 }
 
 #[cfg(test)]

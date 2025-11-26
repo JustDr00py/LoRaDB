@@ -97,12 +97,24 @@ async fn main() -> Result<()> {
     tokio::signal::ctrl_c().await?;
     info!("Shutdown signal received, shutting down gracefully...");
 
-    // Cancel background tasks
-    server_handle.abort();
-    processor_handle.abort();
+    // Stop MQTT ingestion first
     if let Some(handle) = mqtt_handle {
         handle.abort();
     }
+
+    // Stop HTTP server
+    server_handle.abort();
+
+    // Give a moment for in-flight requests to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Flush storage engine (ensures memtable is written to SSTable)
+    if let Err(e) = storage.shutdown().await {
+        error!("Error during storage shutdown: {}", e);
+    }
+
+    // Stop frame processor last
+    processor_handle.abort();
 
     info!("LoRaDB shutdown complete");
 
