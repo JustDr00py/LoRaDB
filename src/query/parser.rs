@@ -282,7 +282,7 @@ impl Tokenizer {
                 _ if ch.is_alphanumeric() || ch == '_' => {
                     let mut identifier = String::new();
                     while let Some(&ch) = chars.peek() {
-                        if ch.is_alphanumeric() || ch == '_' {
+                        if ch.is_alphanumeric() || ch == '_' || ch == '.' {
                             identifier.push(chars.next().unwrap());
                         } else {
                             break;
@@ -409,5 +409,39 @@ mod tests {
         assert_eq!(tokens[2], Token::Identifier("FROM".to_string()));
         assert_eq!(tokens[3], Token::Identifier("device".to_string()));
         assert_eq!(tokens[4], Token::String("0123456789ABCDEF".to_string()));
+    }
+
+    #[test]
+    fn test_parse_nested_field_paths() {
+        let parser = QueryParser::new();
+        let query = parser
+            .parse("SELECT decoded_payload.object.TempC_SHT FROM device 'a84041c7a1881438' WHERE LAST '1h'")
+            .unwrap();
+
+        match query.select {
+            SelectClause::Fields(fields) => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0], "decoded_payload.object.TempC_SHT");
+            }
+            _ => panic!("Expected Fields select clause"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_nested_fields() {
+        let parser = QueryParser::new();
+        let query = parser
+            .parse("SELECT decoded_payload.object.co2, decoded_payload.object.TempC_SHT, f_port FROM device 'a84041c7a1881438'")
+            .unwrap();
+
+        match query.select {
+            SelectClause::Fields(fields) => {
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0], "decoded_payload.object.co2");
+                assert_eq!(fields[1], "decoded_payload.object.TempC_SHT");
+                assert_eq!(fields[2], "f_port");
+            }
+            _ => panic!("Expected Fields select clause"),
+        }
     }
 }
