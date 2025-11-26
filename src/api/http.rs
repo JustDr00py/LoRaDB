@@ -15,13 +15,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
 
-/// HTTPS API server
+/// HTTP/HTTPS API server
 pub struct HttpServer {
     app_state: AppState,
     auth_middleware: AuthMiddleware,
     bind_addr: SocketAddr,
-    tls_cert_path: String,
-    tls_key_path: String,
+    enable_tls: bool,
+    tls_cert_path: Option<String>,
+    tls_key_path: Option<String>,
 }
 
 impl HttpServer {
@@ -45,8 +46,9 @@ impl HttpServer {
             app_state,
             auth_middleware,
             bind_addr: config.bind_addr,
-            tls_cert_path: config.tls_cert.to_string_lossy().to_string(),
-            tls_key_path: config.tls_key.to_string_lossy().to_string(),
+            enable_tls: config.enable_tls,
+            tls_cert_path: config.tls_cert.map(|p| p.to_string_lossy().to_string()),
+            tls_key_path: config.tls_key.map(|p| p.to_string_lossy().to_string()),
         }
     }
 
@@ -73,24 +75,41 @@ impl HttpServer {
             .with_state(self.app_state.clone())
     }
 
-    /// Start the HTTPS server
+    /// Start the HTTP/HTTPS server
     pub async fn serve(self) -> Result<()> {
         let app = self.build_router();
 
-        info!(
-            "Starting HTTPS server on {} with TLS",
-            self.bind_addr
-        );
+        if self.enable_tls {
+            info!(
+                "Starting HTTPS server on {} with TLS",
+                self.bind_addr
+            );
 
-        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-            &self.tls_cert_path,
-            &self.tls_key_path,
-        )
-        .await?;
+            let cert_path = self.tls_cert_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("TLS enabled but cert path not configured")
+            })?;
+            let key_path = self.tls_key_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("TLS enabled but key path not configured")
+            })?;
 
-        axum_server::bind_rustls(self.bind_addr, config)
-            .serve(app.into_make_service())
+            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                cert_path,
+                key_path,
+            )
             .await?;
+
+            axum_server::bind_rustls(self.bind_addr, config)
+                .serve(app.into_make_service())
+                .await?;
+        } else {
+            info!(
+                "Starting HTTP server on {} (TLS disabled - use reverse proxy for HTTPS)",
+                self.bind_addr
+            );
+
+            let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
+            axum::serve(listener, app).await?;
+        }
 
         Ok(())
     }
@@ -127,8 +146,9 @@ mod tests {
 
         let api_config = ApiConfig {
             bind_addr: "127.0.0.1:8080".parse().unwrap(),
-            tls_cert: temp_dir.path().join("cert.pem"),
-            tls_key: temp_dir.path().join("key.pem"),
+            enable_tls: false,
+            tls_cert: None,
+            tls_key: None,
             jwt_secret: "this-is-a-very-secure-secret-key-for-testing".to_string(),
             rate_limit_per_minute: 100,
         };

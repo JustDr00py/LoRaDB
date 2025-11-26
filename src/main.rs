@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     let jwt_service = Arc::new(JwtService::new(&config.api.jwt_secret)?);
 
     // Initialize HTTP server
-    info!("Initializing HTTPS API server on {}", config.api.bind_addr);
+    info!("Initializing API server on {}", config.api.bind_addr);
     let http_server = HttpServer::new(
         storage.clone(),
         jwt_service,

@@ -38,8 +38,9 @@ pub struct StorageConfig {
 #[derive(Debug, Clone)]
 pub struct ApiConfig {
     pub bind_addr: SocketAddr,
-    pub tls_cert: PathBuf,
-    pub tls_key: PathBuf,
+    pub enable_tls: bool,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
     pub jwt_secret: String,
     pub rate_limit_per_minute: u32,
 }
@@ -104,13 +105,24 @@ impl Config {
             .into());
         }
 
+        let enable_tls = parse_env("LORADB_API_ENABLE_TLS", false)?;
+
         let api = ApiConfig {
             bind_addr: parse_env(
                 "LORADB_API_BIND_ADDR",
-                "0.0.0.0:8443".parse().context("Invalid default bind address")?,
+                "0.0.0.0:8080".parse().context("Invalid default bind address")?,
             )?,
-            tls_cert: parse_env_path_required("LORADB_API_TLS_CERT")?,
-            tls_key: parse_env_path_required("LORADB_API_TLS_KEY")?,
+            enable_tls,
+            tls_cert: if enable_tls {
+                Some(parse_env_path_required("LORADB_API_TLS_CERT")?)
+            } else {
+                env::var("LORADB_API_TLS_CERT").ok().map(PathBuf::from)
+            },
+            tls_key: if enable_tls {
+                Some(parse_env_path_required("LORADB_API_TLS_KEY")?)
+            } else {
+                env::var("LORADB_API_TLS_KEY").ok().map(PathBuf::from)
+            },
             jwt_secret: env::var("LORADB_API_JWT_SECRET").context(
                 "LORADB_API_JWT_SECRET must be set",
             )?,
@@ -146,20 +158,37 @@ impl Config {
             .into());
         }
 
-        // Validate TLS certificate paths exist
-        if !self.api.tls_cert.exists() {
-            return Err(LoraDbError::ConfigError(format!(
-                "API TLS certificate not found: {:?}",
-                self.api.tls_cert
-            ))
-            .into());
-        }
-        if !self.api.tls_key.exists() {
-            return Err(LoraDbError::ConfigError(format!(
-                "API TLS key not found: {:?}",
-                self.api.tls_key
-            ))
-            .into());
+        // Validate TLS certificate paths exist if TLS is enabled
+        if self.api.enable_tls {
+            if let Some(ref cert) = self.api.tls_cert {
+                if !cert.exists() {
+                    return Err(LoraDbError::ConfigError(format!(
+                        "API TLS certificate not found: {:?}",
+                        cert
+                    ))
+                    .into());
+                }
+            } else {
+                return Err(LoraDbError::ConfigError(
+                    "TLS enabled but LORADB_API_TLS_CERT not set".to_string(),
+                )
+                .into());
+            }
+
+            if let Some(ref key) = self.api.tls_key {
+                if !key.exists() {
+                    return Err(LoraDbError::ConfigError(format!(
+                        "API TLS key not found: {:?}",
+                        key
+                    ))
+                    .into());
+                }
+            } else {
+                return Err(LoraDbError::ConfigError(
+                    "TLS enabled but LORADB_API_TLS_KEY not set".to_string(),
+                )
+                .into());
+            }
         }
 
         // Validate MQTT CA cert if provided
