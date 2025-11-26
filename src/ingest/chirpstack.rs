@@ -27,8 +27,12 @@ impl Default for ChirpStackParser {
 #[serde(rename_all = "camelCase")]
 struct ChirpStackUplink {
     #[serde(default)]
+    deduplication_id: Option<String>,
+    #[serde(default)]
     time: Option<String>,
     device_info: ChirpStackDeviceInfo,
+    #[serde(default)]
+    dev_addr: Option<String>,
     #[serde(default)]
     f_port: Option<u8>,
     #[serde(default)]
@@ -52,12 +56,24 @@ struct ChirpStackUplink {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChirpStackDeviceInfo {
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    tenant_name: Option<String>,
     dev_eui: String,
     #[serde(default)]
     device_name: Option<String>,
     application_id: String,
     #[serde(default)]
     application_name: Option<String>,
+    #[serde(default)]
+    device_profile_id: Option<String>,
+    #[serde(default)]
+    device_profile_name: Option<String>,
+    #[serde(default)]
+    device_class_enabled: Option<String>,
+    #[serde(default)]
+    tags: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,7 +115,11 @@ impl MessageParser for ChirpStackParser {
         validate_payload_size(payload, MAX_MQTT_PAYLOAD_SIZE)?;
 
         let msg: ChirpStackUplink = serde_json::from_slice(payload)
-            .context("Failed to parse ChirpStack uplink JSON")?;
+            .map_err(|e| {
+                // Log the detailed serde error for debugging
+                tracing::error!("ChirpStack JSON parse error: {}", e);
+                anyhow::anyhow!("Failed to parse ChirpStack uplink JSON: {}", e)
+            })?;
 
         // Validate and create DevEui from deviceInfo
         let dev_eui = DevEui::new(msg.device_info.dev_eui)
