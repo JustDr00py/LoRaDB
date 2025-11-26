@@ -37,12 +37,13 @@ RUN mkdir -p /var/lib/loradb/data && \
     chown -R loradb:loradb /var/lib/loradb && \
     chmod 0700 /var/lib/loradb/data
 
-# Copy binary from builder
+# Copy binaries from builder
 COPY --from=builder /build/target/release/loradb /usr/local/bin/loradb
+COPY --from=builder /build/target/release/generate-token /usr/local/bin/generate-token
 
 # Set ownership
-RUN chown root:root /usr/local/bin/loradb && \
-    chmod 0755 /usr/local/bin/loradb
+RUN chown root:root /usr/local/bin/loradb /usr/local/bin/generate-token && \
+    chmod 0755 /usr/local/bin/loradb /usr/local/bin/generate-token
 
 # Switch to non-root user
 USER loradb
