@@ -26,27 +26,38 @@ impl Default for ChirpStackParser {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChirpStackUplink {
-    dev_eui: String,
     #[serde(default)]
-    device_name: Option<String>,
+    time: Option<String>,
+    device_info: ChirpStackDeviceInfo,
     #[serde(default)]
-    application_id: Option<String>,
+    f_port: Option<u8>,
     #[serde(default)]
-    application_name: Option<String>,
-    f_port: u8,
-    f_cnt: u32,
+    f_cnt: Option<u32>,
     #[serde(default)]
     confirmed: bool,
     #[serde(default)]
     adr: bool,
-    dr: u8,
+    #[serde(default)]
+    dr: Option<u8>,
     #[serde(default)]
     rx_info: Vec<ChirpStackRxInfo>,
-    tx_info: ChirpStackTxInfo,
+    #[serde(default)]
+    tx_info: Option<ChirpStackTxInfo>,
     #[serde(default)]
     object: Option<serde_json::Value>,
     #[serde(default)]
     data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChirpStackDeviceInfo {
+    dev_eui: String,
+    #[serde(default)]
+    device_name: Option<String>,
+    application_id: String,
+    #[serde(default)]
+    application_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,31 +101,32 @@ impl MessageParser for ChirpStackParser {
         let msg: ChirpStackUplink = serde_json::from_slice(payload)
             .context("Failed to parse ChirpStack uplink JSON")?;
 
-        // Validate and create DevEui
-        let dev_eui = DevEui::new(msg.dev_eui)
+        // Validate and create DevEui from deviceInfo
+        let dev_eui = DevEui::new(msg.device_info.dev_eui)
             .map_err(|e| LoraDbError::MqttParseError(e.to_string()))?;
 
-        // Determine application ID (prefer applicationId field, fallback to topic parsing)
-        let application_id = msg
-            .application_id
-            .or(msg.application_name)
-            .or_else(|| {
-                // Parse from topic: application/{app_id}/device/{dev_eui}/event/up
-                topic.split('/').nth(1).map(String::from)
-            })
+        // Use application ID from deviceInfo
+        let application_id = msg.device_info.application_name
+            .or(Some(msg.device_info.application_id))
             .unwrap_or_else(|| "unknown".to_string());
+
+        // Parse timestamp if available
+        let received_at = msg.time
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
 
         let uplink = UplinkFrame {
             dev_eui,
             application_id: ApplicationId::new(application_id),
-            device_name: msg.device_name,
-            received_at: Utc::now(), // ChirpStack v4 may have a time field in some versions
-            f_port: msg.f_port,
-            f_cnt: msg.f_cnt,
+            device_name: msg.device_info.device_name,
+            received_at,
+            f_port: msg.f_port.unwrap_or(0),
+            f_cnt: msg.f_cnt.unwrap_or(0),
             confirmed: msg.confirmed,
             adr: msg.adr,
-            dr: DataRate::new_lora(125000, msg.dr), // Default to 125kHz bandwidth
-            frequency: msg.tx_info.frequency,
+            dr: DataRate::new_lora(125000, msg.dr.unwrap_or(0)), // Default to 125kHz bandwidth
+            frequency: msg.tx_info.as_ref().map(|tx| tx.frequency).unwrap_or(0),
             rx_info: msg
                 .rx_info
                 .into_iter()
@@ -153,9 +165,13 @@ mod tests {
         let parser = ChirpStackParser;
 
         let payload = r#"{
-            "devEui": "0123456789abcdef",
-            "deviceName": "test-sensor",
-            "applicationId": "test-app",
+            "time": "2025-11-26T06:14:58.501022+00:00",
+            "deviceInfo": {
+                "devEui": "0123456789abcdef",
+                "deviceName": "test-sensor",
+                "applicationId": "test-app-id",
+                "applicationName": "test-app"
+            },
             "fPort": 1,
             "fCnt": 42,
             "confirmed": false,
