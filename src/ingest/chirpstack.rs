@@ -92,17 +92,20 @@ struct ChirpStackRxInfo {
 
 #[derive(Debug, Deserialize)]
 struct ChirpStackLocation {
-    latitude: f64,
-    longitude: f64,
+    #[serde(default)]
+    latitude: Option<f64>,
+    #[serde(default)]
+    longitude: Option<f64>,
     #[serde(default)]
     altitude: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChirpStackTxInfo {
-    frequency: u64,
     #[serde(default)]
-    modulation: Option<String>,
+    frequency: Option<u64>,
+    #[serde(default)]
+    modulation: Option<serde_json::Value>, // Can be string or object
 }
 
 impl MessageParser for ChirpStackParser {
@@ -146,7 +149,7 @@ impl MessageParser for ChirpStackParser {
             confirmed: msg.confirmed,
             adr: msg.adr,
             dr: DataRate::new_lora(125000, msg.dr.unwrap_or(0)), // Default to 125kHz bandwidth
-            frequency: msg.tx_info.as_ref().map(|tx| tx.frequency).unwrap_or(0),
+            frequency: msg.tx_info.as_ref().and_then(|tx| tx.frequency).unwrap_or(0),
             rx_info: msg
                 .rx_info
                 .into_iter()
@@ -156,10 +159,16 @@ impl MessageParser for ChirpStackParser {
                     snr: rx.snr,
                     channel: rx.channel,
                     rf_chain: rx.rf_chain,
-                    location: rx.location.map(|loc| GatewayLocation {
-                        latitude: loc.latitude,
-                        longitude: loc.longitude,
-                        altitude: loc.altitude,
+                    location: rx.location.and_then(|loc| {
+                        // Only create location if we have lat/lng
+                        match (loc.latitude, loc.longitude) {
+                            (Some(lat), Some(lng)) => Some(GatewayLocation {
+                                latitude: lat,
+                                longitude: lng,
+                                altitude: loc.altitude,
+                            }),
+                            _ => None,
+                        }
                     }),
                 })
                 .collect(),
