@@ -49,7 +49,66 @@ SELECT received_at, f_port, decoded_payload.object.temperature FROM device '0123
 
 ## Installation
 
-### Option 1: Docker Deployment (Recommended)
+### Deployment Scripts (Quickest Method)
+
+LoRaDB includes automated deployment scripts for easy setup and updates:
+
+#### Initial Deployment
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/loradb
+cd loradb
+
+# Deploy (handles everything)
+./deploy.sh
+```
+
+The `deploy.sh` script will:
+- Validate configuration
+- Build Docker image
+- Create volumes
+- Start LoRaDB
+- Show next steps
+
+#### Updating LoRaDB
+
+When code updates are available:
+
+```bash
+# Pull changes and rebuild
+./update.sh
+```
+
+The `update.sh` script will:
+- Pull latest changes from git
+- Show what's new
+- Rebuild Docker image
+- Restart with data persistence
+- Verify health
+
+#### Daily Management
+
+Use the helper script for common operations:
+
+```bash
+# View all available commands
+./loradb.sh
+
+# Common commands
+./loradb.sh logs              # Follow logs
+./loradb.sh status            # Check status
+./loradb.sh token admin       # Generate JWT token
+./loradb.sh apitoken admin "My Dashboard" 365  # Generate API token
+./loradb.sh backup            # Create backup
+./loradb.sh health            # Check API health
+```
+
+**See [DEPLOYMENT.md](DEPLOYMENT.md) for complete deployment guide.**
+
+---
+
+### Option 1: Docker Deployment (Manual Setup)
 
 #### Prerequisites
 - Docker 20.10+
