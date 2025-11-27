@@ -128,11 +128,11 @@ pub async fn health_check() -> Json<HealthResponse> {
 /// Execute a query
 pub async fn execute_query(
     State(state): State<AppState>,
-    Extension(claims): Extension<Claims>,
+    Extension(auth_context): Extension<AuthContext>,
     Json(request): Json<QueryRequest>,
 ) -> Result<Json<QueryResult>, LoraDbError> {
     tracing::info!(
-        user = claims.sub,
+        user = auth_context.user_id(),
         query = request.query,
         "Executing query"
     );
@@ -156,7 +156,7 @@ pub async fn execute_query(
 /// List all devices
 pub async fn list_devices(
     State(state): State<AppState>,
-    Extension(_claims): Extension<Claims>,
+    Extension(_auth_context): Extension<AuthContext>,
 ) -> Json<DeviceListResponse> {
     let registry = state.storage.device_registry();
     let devices: Vec<DeviceInfo> = registry
@@ -179,7 +179,7 @@ pub async fn list_devices(
 /// Get device information
 pub async fn get_device(
     State(state): State<AppState>,
-    Extension(_claims): Extension<Claims>,
+    Extension(_auth_context): Extension<AuthContext>,
     Path(dev_eui): Path<String>,
 ) -> Result<Json<DeviceInfo>, LoraDbError> {
     let registry = state.storage.device_registry();
@@ -350,6 +350,7 @@ mod tests {
     async fn test_execute_query() {
         let state = create_test_state().await;
         let claims = Claims::new("test-user".to_string());
+        let auth_context = AuthContext::Jwt(claims);
 
         // Write a test frame
         let dev_eui = "0123456789ABCDEF";
@@ -363,7 +364,7 @@ mod tests {
 
         let result = execute_query(
             State(state),
-            Extension(claims),
+            Extension(auth_context),
             Json(request),
         )
         .await
@@ -376,6 +377,7 @@ mod tests {
     async fn test_list_devices() {
         let state = create_test_state().await;
         let claims = Claims::new("test-user".to_string());
+        let auth_context = AuthContext::Jwt(claims);
 
         // Write test frames for different devices
         for i in 0..3 {
@@ -384,7 +386,7 @@ mod tests {
             state.storage.write(frame).await.unwrap();
         }
 
-        let response = list_devices(State(state), Extension(claims)).await;
+        let response = list_devices(State(state), Extension(auth_context)).await;
         assert_eq!(response.0.total_devices, 3);
     }
 }
