@@ -184,6 +184,27 @@ LORADB_API_ENABLE_TLS=false
 - ✅ Additional security features (rate limiting, etc.)
 
 #### Data Persistence
+
+LoRaDB uses an LSM-tree storage engine with multiple persistence layers:
+
+1. **Write-Ahead Log (WAL)**: All writes are immediately logged to `wal/` directory for crash recovery
+2. **Memtable**: In-memory sorted data structure (flushed periodically or when size threshold is reached)
+3. **SSTables**: Immutable sorted files (`sstable-*.sst`) created when memtable is flushed
+
+**When SSTables are created:**
+- Every 5 minutes (configurable via `LORADB_STORAGE_MEMTABLE_FLUSH_INTERVAL_SECS`)
+- When memtable reaches 64MB (configurable via `LORADB_STORAGE_MEMTABLE_SIZE_MB`)
+- On graceful shutdown (SIGTERM/SIGINT)
+
+**Data directory structure:**
+```
+/var/lib/loradb/data/
+├── wal/              # Write-ahead logs
+│   └── segment-*.wal
+├── sstable-*.sst     # Sorted string tables (persistent data)
+└── api_tokens.json   # API token store
+```
+
 Data is persisted in the `loradb-data` Docker volume. To back up your data:
 ```bash
 # Backup
@@ -246,6 +267,7 @@ LORADB_MQTT_TTN_BROKER=mqtts://nam1.cloud.thethings.network:8883
 # Storage Tuning
 LORADB_STORAGE_WAL_SYNC_INTERVAL_MS=1000
 LORADB_STORAGE_MEMTABLE_SIZE_MB=64
+LORADB_STORAGE_MEMTABLE_FLUSH_INTERVAL_SECS=300  # Periodic flush every 5 minutes
 LORADB_STORAGE_COMPACTION_THRESHOLD=10
 
 # Encryption (optional)

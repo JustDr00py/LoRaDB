@@ -90,7 +90,10 @@ cargo run
 1. MQTT message arrives → parsed into `Frame`
 2. Frame sent via `mpsc::channel` to storage engine
 3. Storage writes to WAL (durability), then memtable (speed)
-4. When memtable reaches threshold, flushed to SSTable
+4. Memtable flushed to SSTable when:
+   - Periodic flush timer triggers (default: 5 minutes, configurable via `LORADB_STORAGE_MEMTABLE_FLUSH_INTERVAL_SECS`)
+   - Memtable reaches size threshold (default: 64MB, configurable via `LORADB_STORAGE_MEMTABLE_SIZE_MB`)
+   - Graceful shutdown (SIGTERM/SIGINT)
 5. Multiple SSTables trigger compaction to merge and deduplicate
 
 **Device-First Indexing**: Composite key format `(DevEUI, timestamp, sequence)` enables efficient per-device queries.

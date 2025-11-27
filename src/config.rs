@@ -30,6 +30,7 @@ pub struct StorageConfig {
     pub data_dir: PathBuf,
     pub wal_sync_interval_ms: u64,
     pub memtable_size_mb: usize,
+    pub memtable_flush_interval_secs: u64,
     pub compaction_threshold: usize,
     pub enable_encryption: bool,
     pub encryption_key: Option<String>,
@@ -86,6 +87,10 @@ impl Config {
                 1000,
             )?,
             memtable_size_mb: parse_env("LORADB_STORAGE_MEMTABLE_SIZE_MB", 64)?,
+            memtable_flush_interval_secs: parse_env(
+                "LORADB_STORAGE_MEMTABLE_FLUSH_INTERVAL_SECS",
+                300,  // 5 minutes default
+            )?,
             compaction_threshold: parse_env(
                 "LORADB_STORAGE_COMPACTION_THRESHOLD",
                 10,

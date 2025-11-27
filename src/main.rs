@@ -61,6 +61,10 @@ async fn main() -> Result<()> {
         storage_clone.start_frame_processor(frame_rx).await;
     });
 
+    // Start periodic memtable flush (every 5 minutes)
+    info!("Starting periodic memtable flush task");
+    let flush_handle = storage.clone().start_periodic_flush();
+
     // Initialize MQTT ingestion
     let mqtt_handle = if config.mqtt.chirpstack_broker.is_some() || config.mqtt.ttn_broker.is_some() {
         info!("Initializing MQTT ingestion");
@@ -101,9 +105,27 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
-    info!("Shutdown signal received, shutting down gracefully...");
+    // Wait for shutdown signal (SIGTERM or SIGINT)
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("SIGINT received, shutting down gracefully...");
+        }
+        _ = async {
+            #[cfg(unix)]
+            {
+                let mut sigterm = tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate()
+                ).expect("Failed to register SIGTERM handler");
+                sigterm.recv().await;
+            }
+            #[cfg(not(unix))]
+            {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            info!("SIGTERM received, shutting down gracefully...");
+        }
+    }
 
     // Stop MQTT ingestion first
     if let Some(handle) = mqtt_handle {
@@ -112,6 +134,9 @@ async fn main() -> Result<()> {
 
     // Stop HTTP server
     server_handle.abort();
+
+    // Stop periodic flush task
+    flush_handle.abort();
 
     // Give a moment for in-flight requests to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

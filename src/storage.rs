@@ -344,6 +344,45 @@ impl StorageEngine {
         warn!("Frame processor stopped");
     }
 
+    /// Start periodic memtable flush task
+    /// Returns a JoinHandle that can be aborted on shutdown
+    pub fn start_periodic_flush(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let flush_interval_secs = self.config.memtable_flush_interval_secs;
+
+        info!(
+            "Starting periodic memtable flush (interval: {} seconds)",
+            flush_interval_secs
+        );
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(
+                tokio::time::Duration::from_secs(flush_interval_secs)
+            );
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                // Check if memtable has data
+                let has_data = {
+                    let memtable = self.memtable.read().await;
+                    !memtable.is_empty()
+                };
+
+                if has_data {
+                    info!("Periodic memtable flush starting");
+                    if let Err(e) = self.flush_memtable().await {
+                        warn!("Periodic flush failed: {}", e);
+                    } else {
+                        info!("Periodic memtable flush completed");
+                    }
+                } else {
+                    debug!("Skipping periodic flush (memtable is empty)");
+                }
+            }
+        })
+    }
+
     /// Gracefully shut down storage engine by flushing memtable to SSTable
     pub async fn shutdown(&self) -> Result<()> {
         info!("Shutting down storage engine");
@@ -382,6 +421,7 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             wal_sync_interval_ms: 1000,
             memtable_size_mb: 1, // Small for testing
+            memtable_flush_interval_secs: 300,
             compaction_threshold: 3,
             enable_encryption: false,
             encryption_key: None,

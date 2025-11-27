@@ -150,6 +150,7 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             wal_sync_interval_ms: 1000,
             memtable_size_mb: 1,
+            memtable_flush_interval_secs: 300,
             compaction_threshold: 3,
             enable_encryption: false,
             encryption_key: None,
