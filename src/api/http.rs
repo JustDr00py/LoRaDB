@@ -1,14 +1,18 @@
-use crate::api::handlers::{execute_query, get_device, health_check, list_devices, AppState};
+use crate::api::handlers::{
+    create_token, execute_query, get_device, health_check, list_devices, list_tokens,
+    revoke_token, AppState,
+};
 use crate::api::middleware::{jwt_auth, security_headers, AuthMiddleware};
 use crate::config::ApiConfig;
 use crate::query::executor::QueryExecutor;
 use crate::query::parser::QueryParser;
+use crate::security::api_token::ApiTokenStore;
 use crate::security::jwt::JwtService;
 use crate::storage::StorageEngine;
 use anyhow::Result;
 use axum::{
     middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use std::net::SocketAddr;
@@ -29,6 +33,7 @@ impl HttpServer {
     pub fn new(
         storage: Arc<StorageEngine>,
         jwt_service: Arc<JwtService>,
+        api_token_store: Arc<ApiTokenStore>,
         config: ApiConfig,
     ) -> Self {
         let query_executor = Arc::new(QueryExecutor::new(storage.clone()));
@@ -38,9 +43,10 @@ impl HttpServer {
             storage,
             query_executor,
             query_parser,
+            api_token_store: api_token_store.clone(),
         };
 
-        let auth_middleware = AuthMiddleware::new(jwt_service);
+        let auth_middleware = AuthMiddleware::new(jwt_service, api_token_store);
 
         Self {
             app_state,
@@ -62,6 +68,10 @@ impl HttpServer {
             .route("/query", post(execute_query))
             .route("/devices", get(list_devices))
             .route("/devices/:dev_eui", get(get_device))
+            // API token management routes
+            .route("/tokens", post(create_token))
+            .route("/tokens", get(list_tokens))
+            .route("/tokens/:token_id", delete(revoke_token))
             .layer(middleware::from_fn_with_state(
                 self.auth_middleware.clone(),
                 jwt_auth,
@@ -144,6 +154,9 @@ mod tests {
         let jwt_service = Arc::new(
             JwtService::new("this-is-a-very-secure-secret-key-for-testing").unwrap(),
         );
+        let api_token_store = Arc::new(
+            ApiTokenStore::new(temp_dir.path().join("tokens.json")).unwrap(),
+        );
 
         let api_config = ApiConfig {
             bind_addr: "127.0.0.1:8080".parse().unwrap(),
@@ -155,7 +168,7 @@ mod tests {
             rate_limit_per_minute: 100,
         };
 
-        HttpServer::new(storage, jwt_service, api_config)
+        HttpServer::new(storage, jwt_service, api_token_store, api_config)
     }
 
     #[tokio::test]

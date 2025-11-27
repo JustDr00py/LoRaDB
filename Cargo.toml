@@ -43,6 +43,7 @@ argon2 = "0.5"
 rand = "0.8"
 zeroize = "1.7"
 base64 = "0.22"
+sha2 = "0.10"
 
 # Error handling
 thiserror = "1.0"
@@ -105,3 +106,7 @@ harness = false
 [[bin]]
 name = "generate-token"
 path = "src/bin/generate-token.rs"
+
+[[bin]]
+name = "generate-api-token"
+path = "src/bin/generate-api-token.rs"

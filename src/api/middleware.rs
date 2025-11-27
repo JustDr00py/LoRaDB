@@ -1,5 +1,6 @@
 use crate::error::LoraDbError;
 use crate::security::jwt::{Claims, JwtService};
+use crate::security::api_token::ApiTokenStore;
 use axum::{
     body::Body,
     extract::State,
@@ -10,19 +11,42 @@ use axum::{
 use std::sync::Arc;
 use tracing::warn;
 
-/// JWT authentication middleware state
-#[derive(Clone)]
-pub struct AuthMiddleware {
-    pub jwt_service: Arc<JwtService>,
+/// Authentication context that can be extracted by handlers
+#[derive(Clone, Debug)]
+pub enum AuthContext {
+    /// JWT-based authentication
+    Jwt(Claims),
+    /// API token-based authentication
+    ApiToken { user_id: String, token_id: String },
 }
 
-impl AuthMiddleware {
-    pub fn new(jwt_service: Arc<JwtService>) -> Self {
-        Self { jwt_service }
+impl AuthContext {
+    /// Get the user ID from the auth context
+    pub fn user_id(&self) -> &str {
+        match self {
+            AuthContext::Jwt(claims) => &claims.sub,
+            AuthContext::ApiToken { user_id, .. } => user_id,
+        }
     }
 }
 
-/// JWT authentication middleware
+/// Authentication middleware state
+#[derive(Clone)]
+pub struct AuthMiddleware {
+    pub jwt_service: Arc<JwtService>,
+    pub api_token_store: Arc<ApiTokenStore>,
+}
+
+impl AuthMiddleware {
+    pub fn new(jwt_service: Arc<JwtService>, api_token_store: Arc<ApiTokenStore>) -> Self {
+        Self {
+            jwt_service,
+            api_token_store,
+        }
+    }
+}
+
+/// Unified authentication middleware supporting both JWT and API tokens
 pub async fn jwt_auth(
     State(auth): State<AuthMiddleware>,
     mut request: Request<Body>,
@@ -43,17 +67,36 @@ pub async fn jwt_auth(
 
     let token = &auth_header[7..]; // Remove "Bearer " prefix
 
-    // Validate token
-    let claims = auth
-        .jwt_service
-        .validate_token(token)
-        .map_err(|e| {
-            warn!("Token validation failed: {}", e);
-            StatusCode::UNAUTHORIZED
-        })?;
+    // Try to determine token type and authenticate
+    let auth_context = if token.starts_with("ldb_") {
+        // API Token authentication
+        match auth.api_token_store.validate_token(token) {
+            Ok(api_token) => AuthContext::ApiToken {
+                user_id: api_token.created_by.clone(),
+                token_id: api_token.id.clone(),
+            },
+            Err(e) => {
+                warn!("API token validation failed: {}", e);
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    } else {
+        // JWT authentication
+        match auth.jwt_service.validate_token(token) {
+            Ok(claims) => {
+                // For backward compatibility, also insert Claims
+                request.extensions_mut().insert(claims.clone());
+                AuthContext::Jwt(claims)
+            }
+            Err(e) => {
+                warn!("JWT validation failed: {}", e);
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    };
 
-    // Insert claims into request extensions for handlers to use
-    request.extensions_mut().insert(claims);
+    // Insert auth context into request extensions for handlers to use
+    request.extensions_mut().insert(auth_context);
 
     Ok(next.run(request).await)
 }
@@ -125,6 +168,7 @@ pub fn cors_headers() -> HeaderMap {
 mod tests {
     use super::*;
     use crate::security::jwt::JwtService;
+    use crate::security::api_token::ApiTokenStore;
     use axum::{
         body::Body,
         http::StatusCode,
@@ -139,10 +183,18 @@ mod tests {
         format!("Hello, {}", claims.sub)
     }
 
+    async fn protected_handler_auth_context(Extension(auth): Extension<AuthContext>) -> String {
+        format!("Hello, {}", auth.user_id())
+    }
+
     #[tokio::test]
     async fn test_jwt_auth_valid_token() {
         let jwt_service = Arc::new(
             JwtService::new("this-is-a-very-secure-secret-key-for-testing").unwrap(),
+        );
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let api_token_store = Arc::new(
+            ApiTokenStore::new(temp_dir.path().join("tokens.json")).unwrap(),
         );
 
         // Generate test token
@@ -150,7 +202,7 @@ mod tests {
         let token = jwt_service.generate_token(claims).unwrap();
 
         // Create test app
-        let auth_middleware = AuthMiddleware::new(jwt_service);
+        let auth_middleware = AuthMiddleware::new(jwt_service, api_token_store);
         let app = Router::new()
             .route("/protected", get(protected_handler))
             .layer(middleware::from_fn_with_state(
@@ -174,8 +226,12 @@ mod tests {
         let jwt_service = Arc::new(
             JwtService::new("this-is-a-very-secure-secret-key-for-testing").unwrap(),
         );
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let api_token_store = Arc::new(
+            ApiTokenStore::new(temp_dir.path().join("tokens.json")).unwrap(),
+        );
 
-        let auth_middleware = AuthMiddleware::new(jwt_service);
+        let auth_middleware = AuthMiddleware::new(jwt_service, api_token_store);
         let app = Router::new()
             .route("/protected", get(protected_handler))
             .layer(middleware::from_fn_with_state(
@@ -198,8 +254,12 @@ mod tests {
         let jwt_service = Arc::new(
             JwtService::new("this-is-a-very-secure-secret-key-for-testing").unwrap(),
         );
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let api_token_store = Arc::new(
+            ApiTokenStore::new(temp_dir.path().join("tokens.json")).unwrap(),
+        );
 
-        let auth_middleware = AuthMiddleware::new(jwt_service);
+        let auth_middleware = AuthMiddleware::new(jwt_service, api_token_store);
         let app = Router::new()
             .route("/protected", get(protected_handler))
             .layer(middleware::from_fn_with_state(
@@ -216,6 +276,41 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_api_token_auth_valid() {
+        let jwt_service = Arc::new(
+            JwtService::new("this-is-a-very-secure-secret-key-for-testing").unwrap(),
+        );
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let api_token_store = Arc::new(
+            ApiTokenStore::new(temp_dir.path().join("tokens.json")).unwrap(),
+        );
+
+        // Create an API token
+        let (token, _) = api_token_store
+            .create_token("Test Token".to_string(), "test-user".to_string(), None)
+            .unwrap();
+
+        // Create test app
+        let auth_middleware = AuthMiddleware::new(jwt_service, api_token_store);
+        let app = Router::new()
+            .route("/protected", get(protected_handler_auth_context))
+            .layer(middleware::from_fn_with_state(
+                auth_middleware,
+                jwt_auth,
+            ));
+
+        // Make request with API token
+        let request = Request::builder()
+            .uri("/protected")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

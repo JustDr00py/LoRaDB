@@ -1,6 +1,7 @@
 use loradb::api::http::HttpServer;
 use loradb::config::Config;
 use loradb::ingest::mqtt::{BrokerConfig, MqttIngestor};
+use loradb::security::api_token::ApiTokenStore;
 use loradb::security::jwt::JwtService;
 use loradb::storage::StorageEngine;
 use anyhow::Result;
@@ -36,11 +37,18 @@ async fn main() -> Result<()> {
     info!("Initializing JWT authentication");
     let jwt_service = Arc::new(JwtService::new(&config.api.jwt_secret)?);
 
+    // Initialize API token store
+    info!("Initializing API token store");
+    let token_store_path = config.storage.data_dir.join("api_tokens.json");
+    let api_token_store = Arc::new(ApiTokenStore::new(&token_store_path)?);
+    info!("API token store initialized at {}", token_store_path.display());
+
     // Initialize HTTP server
     info!("Initializing API server on {}", config.api.bind_addr);
     let http_server = HttpServer::new(
         storage.clone(),
         jwt_service,
+        api_token_store,
         config.api.clone(),
     );
 

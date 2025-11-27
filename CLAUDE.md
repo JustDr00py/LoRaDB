@@ -114,11 +114,12 @@ cargo run
 
 **API Layer** (`src/api/`):
 - `http.rs`: Axum HTTP server with optional TLS (use reverse proxy in production)
-- `handlers.rs`: REST endpoints (`/health`, `/query`, `/devices`, `/devices/:dev_eui`)
-- `middleware.rs`: JWT authentication, security headers, CORS
+- `handlers.rs`: REST endpoints (`/health`, `/query`, `/devices`, `/devices/:dev_eui`, `/tokens`)
+- `middleware.rs`: Dual authentication (JWT + API tokens), security headers, CORS
 
 **Security** (`src/security/`):
-- `jwt.rs`: HS256 token generation/validation with 1-hour expiration
+- `jwt.rs`: HS256 token generation/validation with configurable expiration (default: 1 hour)
+- `api_token.rs`: Long-lived API token management with revocation, expiration, and usage tracking
 - `encryption.rs`: Optional AES-256-GCM data-at-rest encryption with key zeroization
 - `tls.rs`: Rustls configuration for HTTPS
 
@@ -196,6 +197,41 @@ When using field projection, results include only the requested fields:
 - Frame enum variants are automatically unwrapped for easier querying
 - Non-existent fields are silently omitted from results
 - The `DecodedPayload.object` field contains the arbitrary JSON from the network server decoder
+
+## Authentication: JWT vs API Tokens
+
+LoRaDB supports two authentication methods:
+
+### JWT Tokens (Short-lived)
+- **Use case**: Interactive sessions, testing, temporary access
+- **Expiration**: Configurable (default: 1 hour via `LORADB_API_JWT_EXPIRATION_HOURS`)
+- **Generation**: `cargo run --bin generate-token <username>`
+- **Format**: Standard JWT (eyJ...)
+- **Pros**: Stateless, self-contained claims
+- **Cons**: Cannot be revoked, short-lived (requires re-authentication)
+
+### API Tokens (Long-lived)
+- **Use case**: Dashboards, automation, services, long-running applications
+- **Expiration**: Optional (configurable per-token or never expires)
+- **Generation**: `cargo run --bin generate-api-token <data_dir> <username> [name] [days]`
+- **Format**: `ldb_` prefix + 32 alphanumeric characters
+- **Pros**: Revocable, named, tracked (last used), multiple per user
+- **Cons**: Requires storage (JSON file in data directory)
+
+### API Token Management
+- **Create**: `POST /tokens` with `{"name": "Token Name", "expires_in_days": 365}`
+- **List**: `GET /tokens` (returns all tokens for authenticated user)
+- **Revoke**: `DELETE /tokens/:token_id`
+- **Storage**: `<data_dir>/api_tokens.json` (SHA256 hashed tokens)
+- **Module**: `src/security/api_token.rs`
+
+### Authentication Middleware
+- **Module**: `src/api/middleware.rs`
+- **Detection**: Automatically detects token type (JWT vs `ldb_` prefix)
+- **Context**: Inserts `AuthContext` enum (Jwt or ApiToken) into request extensions
+- **Backward compatibility**: JWT authentication also inserts `Claims` for existing handlers
+
+See **API_TOKEN_GUIDE.md** for detailed usage examples and best practices.
 
 ## Important Implementation Details
 
