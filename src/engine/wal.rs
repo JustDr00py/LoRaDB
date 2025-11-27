@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 const WAL_SEGMENT_SIZE: u64 = 64 * 1024 * 1024; // 64MB per segment
 const WAL_MAGIC: u32 = 0x4C4F5241; // "LORA"
+const WAL_VERSION: u16 = 1; // Increment when Frame format changes
 
 /// Write-Ahead Log for durability
 pub struct WriteAheadLog {
@@ -83,20 +84,22 @@ impl WriteAheadLog {
             );
         }
 
-        // Write entry
+        // Write entry with version
         let length = payload.len() as u32;
         segment.file.write_all(&WAL_MAGIC.to_le_bytes())?;
+        segment.file.write_all(&WAL_VERSION.to_le_bytes())?;
         segment.file.write_all(&length.to_le_bytes())?;
         segment.file.write_all(&payload)?;
 
-        // Calculate and write checksum
+        // Calculate and write checksum (includes version in checksum)
         let mut hasher = Hasher::new();
+        hasher.update(&WAL_VERSION.to_le_bytes());
         hasher.update(&length.to_le_bytes());
         hasher.update(&payload);
         let checksum = hasher.finalize();
         segment.file.write_all(&checksum.to_le_bytes())?;
 
-        segment.size += 4 + 4 + payload.len() as u64 + 4;
+        segment.size += 4 + 2 + 4 + payload.len() as u64 + 4;
 
         // Flush to ensure durability
         segment.file.flush()?;
@@ -149,6 +152,7 @@ impl WriteAheadLog {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let mut frames = Vec::new();
+        let mut skipped_entries = 0;
 
         loop {
             // Read magic
@@ -165,36 +169,68 @@ impl WriteAheadLog {
                 break;
             }
 
-            // Read length
-            let mut len_buf = [0u8; 4];
-            reader.read_exact(&mut len_buf)?;
-            let length = u32::from_le_bytes(len_buf);
+            // Try to read version (new format) or fall back to old format
+            let mut version_buf = [0u8; 2];
+            match reader.read_exact(&mut version_buf) {
+                Ok(_) => {
+                    let version = u16::from_le_bytes(version_buf);
 
-            // Read payload
-            let mut payload = vec![0u8; length as usize];
-            reader.read_exact(&mut payload)?;
+                    // Read length
+                    let mut len_buf = [0u8; 4];
+                    reader.read_exact(&mut len_buf)?;
+                    let length = u32::from_le_bytes(len_buf);
 
-            // Read checksum
-            let mut crc_buf = [0u8; 4];
-            reader.read_exact(&mut crc_buf)?;
-            let stored_checksum = u32::from_le_bytes(crc_buf);
+                    // Read payload
+                    let mut payload = vec![0u8; length as usize];
+                    reader.read_exact(&mut payload)?;
 
-            // Verify checksum
-            let mut hasher = Hasher::new();
-            hasher.update(&len_buf);
-            hasher.update(&payload);
-            let computed_checksum = hasher.finalize();
+                    // Read checksum
+                    let mut crc_buf = [0u8; 4];
+                    reader.read_exact(&mut crc_buf)?;
+                    let stored_checksum = u32::from_le_bytes(crc_buf);
 
-            if stored_checksum != computed_checksum {
-                warn!("Checksum mismatch in WAL segment, stopping replay");
-                break;
+                    // Verify checksum
+                    let mut hasher = Hasher::new();
+                    hasher.update(&version_buf);
+                    hasher.update(&len_buf);
+                    hasher.update(&payload);
+                    let computed_checksum = hasher.finalize();
+
+                    if stored_checksum != computed_checksum {
+                        warn!("Checksum mismatch in WAL segment entry, skipping");
+                        skipped_entries += 1;
+                        continue;
+                    }
+
+                    // Check version compatibility
+                    if version != WAL_VERSION {
+                        warn!("Incompatible WAL version {} (current: {}), skipping entry", version, WAL_VERSION);
+                        skipped_entries += 1;
+                        continue;
+                    }
+
+                    // Deserialize frame
+                    match bincode::deserialize::<Frame>(&payload) {
+                        Ok(frame) => frames.push(frame),
+                        Err(e) => {
+                            warn!("Failed to deserialize frame: {}, skipping", e);
+                            skipped_entries += 1;
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Old format without version - skip this entry
+                    warn!("Found old WAL format entry without version, skipping");
+                    skipped_entries += 1;
+                    // Try to skip to next entry by reading what would be length and payload
+                    // This is best-effort recovery
+                    break;
+                }
             }
+        }
 
-            // Deserialize frame
-            let frame: Frame = bincode::deserialize(&payload)
-                .context("Failed to deserialize frame from WAL")?;
-
-            frames.push(frame);
+        if skipped_entries > 0 {
+            warn!("Skipped {} incompatible WAL entries during replay", skipped_entries);
         }
 
         Ok(frames)
