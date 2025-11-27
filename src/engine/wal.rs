@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 
 const WAL_SEGMENT_SIZE: u64 = 64 * 1024 * 1024; // 64MB per segment
 const WAL_MAGIC: u32 = 0x4C4F5241; // "LORA"
-const WAL_VERSION: u16 = 1; // Increment when Frame format changes
+const WAL_VERSION: u16 = 2; // v2: Fixed bincode compatibility for serde_json::Value
 
 /// Write-Ahead Log for durability
 pub struct WriteAheadLog {
