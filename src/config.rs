@@ -45,6 +45,7 @@ pub struct ApiConfig {
     pub jwt_secret: String,
     pub jwt_expiration_hours: i64,
     pub rate_limit_per_minute: u32,
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -113,6 +114,14 @@ impl Config {
 
         let enable_tls = parse_env("LORADB_API_ENABLE_TLS", false)?;
 
+        // Parse CORS allowed origins (comma-separated list)
+        let cors_allowed_origins = env::var("LORADB_API_CORS_ALLOWED_ORIGINS")
+            .unwrap_or_else(|_| "*".to_string())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<String>>();
+
         let api = ApiConfig {
             bind_addr: parse_env(
                 "LORADB_API_BIND_ADDR",
@@ -140,6 +149,7 @@ impl Config {
                 "LORADB_API_RATE_LIMIT_PER_MINUTE",
                 60,
             )?,
+            cors_allowed_origins,
         };
 
         // Validate JWT secret length

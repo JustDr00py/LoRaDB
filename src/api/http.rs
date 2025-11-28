@@ -17,6 +17,7 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
 
 /// HTTP/HTTPS API server
@@ -27,6 +28,7 @@ pub struct HttpServer {
     enable_tls: bool,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
+    cors_allowed_origins: Vec<String>,
 }
 
 impl HttpServer {
@@ -55,6 +57,7 @@ impl HttpServer {
             enable_tls: config.enable_tls,
             tls_cert_path: config.tls_cert.map(|p| p.to_string_lossy().to_string()),
             tls_key_path: config.tls_key.map(|p| p.to_string_lossy().to_string()),
+            cors_allowed_origins: config.cors_allowed_origins,
         }
     }
 
@@ -77,10 +80,37 @@ impl HttpServer {
                 jwt_auth,
             ));
 
+        // Build CORS layer based on configuration
+        let cors = if self.cors_allowed_origins.len() == 1 && self.cors_allowed_origins[0] == "*" {
+            // Allow all origins (development mode)
+            CorsLayer::permissive()
+        } else {
+            // Restrict to specific origins (production mode)
+            let origins: Vec<_> = self
+                .cors_allowed_origins
+                .iter()
+                .filter_map(|origin| origin.parse().ok())
+                .collect();
+
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                ])
+        };
+
         // Combine routes and apply global middleware
         Router::new()
             .merge(public_routes)
             .merge(protected_routes)
+            .layer(cors)
             .layer(middleware::from_fn(security_headers))
             .with_state(self.app_state.clone())
     }
@@ -167,6 +197,7 @@ mod tests {
             jwt_secret: "this-is-a-very-secure-secret-key-for-testing".to_string(),
             jwt_expiration_hours: 1,
             rate_limit_per_minute: 100,
+            cors_allowed_origins: vec!["*".to_string()],
         };
 
         HttpServer::new(storage, jwt_service, api_token_store, api_config)
@@ -237,5 +268,79 @@ mod tests {
         assert!(headers.contains_key(http::header::STRICT_TRANSPORT_SECURITY));
         assert!(headers.contains_key(http::header::CONTENT_SECURITY_POLICY));
         assert!(headers.contains_key(http::header::X_FRAME_OPTIONS));
+    }
+
+    #[tokio::test]
+    async fn test_cors_headers_present() {
+        let server = create_test_server().await;
+        let app = server.build_router();
+
+        // Make an OPTIONS request (preflight)
+        let request = Request::builder()
+            .method(http::Method::OPTIONS)
+            .uri("/health")
+            .header(http::header::ORIGIN, "http://localhost:3000")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        // Verify CORS headers are present
+        let headers = response.headers();
+        assert!(headers.contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+
+    #[tokio::test]
+    async fn test_cors_with_specific_origins() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_config = StorageConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            wal_sync_interval_ms: 1000,
+            memtable_size_mb: 1,
+            memtable_flush_interval_secs: 300,
+            compaction_threshold: 3,
+            enable_encryption: false,
+            encryption_key: None,
+        };
+
+        let storage = Arc::new(StorageEngine::new(storage_config).await.unwrap());
+        let jwt_service = Arc::new(
+            JwtService::new("this-is-a-very-secure-secret-key-for-testing").unwrap(),
+        );
+        let api_token_store = Arc::new(
+            ApiTokenStore::new(temp_dir.path().join("tokens.json")).unwrap(),
+        );
+
+        // Configure with specific allowed origins
+        let api_config = ApiConfig {
+            bind_addr: "127.0.0.1:8080".parse().unwrap(),
+            enable_tls: false,
+            tls_cert: None,
+            tls_key: None,
+            jwt_secret: "this-is-a-very-secure-secret-key-for-testing".to_string(),
+            jwt_expiration_hours: 1,
+            rate_limit_per_minute: 100,
+            cors_allowed_origins: vec![
+                "https://dashboard.example.com".to_string(),
+                "https://admin.example.com".to_string(),
+            ],
+        };
+
+        let server = HttpServer::new(storage, jwt_service, api_token_store, api_config);
+        let app = server.build_router();
+
+        // Make request from allowed origin
+        let request = Request::builder()
+            .method(http::Method::OPTIONS)
+            .uri("/health")
+            .header(http::header::ORIGIN, "https://dashboard.example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        // Verify CORS allows the specific origin
+        let headers = response.headers();
+        assert!(headers.contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
     }
 }
