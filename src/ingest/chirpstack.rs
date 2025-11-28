@@ -79,9 +79,12 @@ struct ChirpStackDeviceInfo {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChirpStackRxInfo {
-    gateway_id: String,
-    rssi: i16,
-    snr: f32,
+    #[serde(default)]
+    gateway_id: Option<String>,
+    #[serde(default)]
+    rssi: Option<i16>,
+    #[serde(default)]
+    snr: Option<f32>,
     #[serde(default)]
     channel: u8,
     #[serde(default)]
@@ -154,9 +157,9 @@ impl MessageParser for ChirpStackParser {
                 .rx_info
                 .into_iter()
                 .map(|rx| GatewayRxInfo {
-                    gateway_id: GatewayEui::new(rx.gateway_id),
-                    rssi: rx.rssi,
-                    snr: rx.snr,
+                    gateway_id: GatewayEui::new(rx.gateway_id.unwrap_or_else(|| "unknown".to_string())),
+                    rssi: rx.rssi.unwrap_or(0),
+                    snr: rx.snr.unwrap_or(0.0),
                     channel: rx.channel,
                     rf_chain: rx.rf_chain,
                     location: rx.location.and_then(|loc| {
@@ -236,6 +239,60 @@ mod tests {
                 assert_eq!(uplink.f_cnt, 42);
                 assert_eq!(uplink.rx_info.len(), 1);
                 assert!(uplink.decoded_payload.is_some());
+            }
+            _ => panic!("Expected Uplink frame"),
+        }
+    }
+
+    #[test]
+    fn test_chirpstack_parser_missing_rx_metadata() {
+        let parser = ChirpStackParser;
+
+        // Test with missing snr, rssi, and gatewayId fields
+        let payload = r#"{
+            "time": "2025-11-28T05:38:55.546236991+00:00",
+            "deviceInfo": {
+                "devEui": "ff00000000009523",
+                "deviceName": "test-device",
+                "applicationId": "test-app-id",
+                "applicationName": "test-app"
+            },
+            "fPort": 2,
+            "fCnt": 100,
+            "confirmed": false,
+            "adr": false,
+            "dr": 3,
+            "rxInfo": [{
+                "channel": 1,
+                "rfChain": 0
+            }],
+            "txInfo": {
+                "frequency": 915000000
+            },
+            "object": {
+                "sensor": "value"
+            }
+        }"#;
+
+        let topic = "application/test-app/device/ff00000000009523/event/up";
+        let result = parser.parse_message(topic, payload.as_bytes());
+
+        // Should parse successfully even with missing fields
+        assert!(result.is_ok(), "Parser should handle missing rx metadata fields");
+
+        let frame = result.unwrap().unwrap();
+        match frame {
+            Frame::Uplink(uplink) => {
+                assert_eq!(uplink.dev_eui.as_str(), "ff00000000009523");
+                assert_eq!(uplink.f_port, 2);
+                assert_eq!(uplink.f_cnt, 100);
+                assert_eq!(uplink.rx_info.len(), 1);
+
+                // Verify default values are used
+                assert_eq!(uplink.rx_info[0].gateway_id.as_str(), "unknown");
+                assert_eq!(uplink.rx_info[0].rssi, 0);
+                assert_eq!(uplink.rx_info[0].snr, 0.0);
+                assert_eq!(uplink.rx_info[0].channel, 1);
             }
             _ => panic!("Expected Uplink frame"),
         }
