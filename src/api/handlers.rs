@@ -287,6 +287,206 @@ pub async fn revoke_token(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ===== Retention Policy Handlers =====
+
+/// Retention policy response structures
+#[derive(Debug, Serialize)]
+pub struct RetentionPolicyListResponse {
+    pub global_days: Option<u32>,
+    pub check_interval_hours: u64,
+    pub applications: Vec<ApplicationRetentionPolicy>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplicationRetentionPolicy {
+    pub application_id: String,
+    pub days: Option<u32>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlobalRetentionResponse {
+    pub global_days: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetGlobalRetentionRequest {
+    pub days: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetApplicationRetentionRequest {
+    pub days: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplicationRetentionResponse {
+    pub application_id: String,
+    pub days: Option<u32>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// List all retention policies
+pub async fn list_retention_policies(
+    State(state): State<AppState>,
+    Extension(_auth_context): Extension<AuthContext>,
+) -> Result<Json<RetentionPolicyListResponse>, LoraDbError> {
+    let retention_manager = state.storage.retention_manager();
+    let policies = retention_manager.get_policies().await;
+
+    let applications: Vec<ApplicationRetentionPolicy> = policies
+        .applications
+        .into_iter()
+        .map(|(app_id, policy)| ApplicationRetentionPolicy {
+            application_id: app_id,
+            days: policy.days,
+            created_at: policy.created_at.to_rfc3339(),
+            updated_at: policy.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(RetentionPolicyListResponse {
+        global_days: policies.global_days,
+        check_interval_hours: policies.check_interval_hours,
+        applications,
+    }))
+}
+
+/// Get global retention policy
+pub async fn get_global_retention(
+    State(state): State<AppState>,
+    Extension(_auth_context): Extension<AuthContext>,
+) -> Result<Json<GlobalRetentionResponse>, LoraDbError> {
+    let retention_manager = state.storage.retention_manager();
+    let global_days = retention_manager.get_global().await;
+
+    Ok(Json(GlobalRetentionResponse { global_days }))
+}
+
+/// Set global retention policy
+pub async fn set_global_retention(
+    State(state): State<AppState>,
+    Extension(auth_context): Extension<AuthContext>,
+    Json(request): Json<SetGlobalRetentionRequest>,
+) -> Result<StatusCode, LoraDbError> {
+    let user_id = auth_context.user_id();
+
+    tracing::info!(
+        user = user_id,
+        days = ?request.days,
+        "Setting global retention policy"
+    );
+
+    let retention_manager = state.storage.retention_manager();
+    retention_manager
+        .set_global(request.days)
+        .await
+        .map_err(|e| LoraDbError::StorageError(format!("Failed to set retention policy: {}", e)))?;
+
+    Ok(StatusCode::OK)
+}
+
+/// Get application-specific retention policy
+pub async fn get_application_retention(
+    State(state): State<AppState>,
+    Extension(_auth_context): Extension<AuthContext>,
+    Path(app_id): Path<String>,
+) -> Result<Json<ApplicationRetentionResponse>, LoraDbError> {
+    let retention_manager = state.storage.retention_manager();
+
+    if let Some(policy) = retention_manager.get_application(&app_id).await {
+        Ok(Json(ApplicationRetentionResponse {
+            application_id: app_id,
+            days: policy.days,
+            created_at: policy.created_at.to_rfc3339(),
+            updated_at: policy.updated_at.to_rfc3339(),
+        }))
+    } else {
+        Err(LoraDbError::StorageError(format!(
+            "No retention policy found for application '{}'",
+            app_id
+        )))
+    }
+}
+
+/// Set application-specific retention policy
+pub async fn set_application_retention(
+    State(state): State<AppState>,
+    Extension(auth_context): Extension<AuthContext>,
+    Path(app_id): Path<String>,
+    Json(request): Json<SetApplicationRetentionRequest>,
+) -> Result<StatusCode, LoraDbError> {
+    let user_id = auth_context.user_id();
+
+    tracing::info!(
+        user = user_id,
+        application_id = app_id,
+        days = ?request.days,
+        "Setting application retention policy"
+    );
+
+    let retention_manager = state.storage.retention_manager();
+    retention_manager
+        .set_application(app_id, request.days)
+        .await
+        .map_err(|e| LoraDbError::StorageError(format!("Failed to set retention policy: {}", e)))?;
+
+    Ok(StatusCode::OK)
+}
+
+/// Delete application-specific retention policy
+pub async fn delete_application_retention(
+    State(state): State<AppState>,
+    Extension(auth_context): Extension<AuthContext>,
+    Path(app_id): Path<String>,
+) -> Result<StatusCode, LoraDbError> {
+    let user_id = auth_context.user_id();
+
+    tracing::info!(
+        user = user_id,
+        application_id = app_id,
+        "Deleting application retention policy"
+    );
+
+    let retention_manager = state.storage.retention_manager();
+    let removed = retention_manager
+        .remove_application(&app_id)
+        .await
+        .map_err(|e| LoraDbError::StorageError(format!("Failed to delete retention policy: {}", e)))?;
+
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(LoraDbError::StorageError(format!(
+            "No retention policy found for application '{}'",
+            app_id
+        )))
+    }
+}
+
+/// Trigger immediate retention enforcement
+pub async fn enforce_retention(
+    State(state): State<AppState>,
+    Extension(auth_context): Extension<AuthContext>,
+) -> Result<StatusCode, LoraDbError> {
+    let user_id = auth_context.user_id();
+
+    tracing::info!(
+        user = user_id,
+        "Triggering immediate retention enforcement"
+    );
+
+    state
+        .storage
+        .enforce_retention()
+        .await
+        .map_err(|e| LoraDbError::StorageError(format!("Failed to enforce retention: {}", e)))?;
+
+    Ok(StatusCode::OK)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

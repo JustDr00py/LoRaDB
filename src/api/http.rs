@@ -1,6 +1,8 @@
 use crate::api::handlers::{
-    create_token, execute_query, get_device, health_check, list_devices, list_tokens,
-    revoke_token, AppState,
+    create_token, delete_application_retention, enforce_retention, execute_query,
+    get_application_retention, get_device, get_global_retention, health_check, list_devices,
+    list_retention_policies, list_tokens, revoke_token, set_application_retention,
+    set_global_retention, AppState,
 };
 use crate::api::middleware::{jwt_auth, security_headers, AuthMiddleware};
 use crate::config::ApiConfig;
@@ -75,6 +77,14 @@ impl HttpServer {
             .route("/tokens", post(create_token))
             .route("/tokens", get(list_tokens))
             .route("/tokens/:token_id", delete(revoke_token))
+            // Retention policy management routes
+            .route("/retention/policies", get(list_retention_policies))
+            .route("/retention/policies/global", get(get_global_retention))
+            .route("/retention/policies/global", axum::routing::put(set_global_retention))
+            .route("/retention/policies/:app_id", get(get_application_retention))
+            .route("/retention/policies/:app_id", axum::routing::put(set_application_retention))
+            .route("/retention/policies/:app_id", delete(delete_application_retention))
+            .route("/retention/enforce", post(enforce_retention))
             .layer(middleware::from_fn_with_state(
                 self.auth_middleware.clone(),
                 jwt_auth,
@@ -97,6 +107,7 @@ impl HttpServer {
                 .allow_methods([
                     axum::http::Method::GET,
                     axum::http::Method::POST,
+                    axum::http::Method::PUT,
                     axum::http::Method::DELETE,
                     axum::http::Method::OPTIONS,
                 ])

@@ -79,12 +79,13 @@ cargo run
 
 ### Core Components
 
-**Storage Engine** (`src/storage.rs`, `src/engine/`):
+**Storage Engine** (`src/storage/mod.rs`, `src/engine/`):
 - **LSM-Tree Architecture**: Write-Ahead Log → Memtable → SSTables → Compaction
 - **WAL** (`engine/wal.rs`): CRC32-checksummed entries with crash recovery
 - **Memtable** (`engine/memtable.rs`): Lock-free `crossbeam-skiplist` for in-memory writes
 - **SSTables** (`engine/sstable.rs`): Immutable sorted files with bloom filters and LZ4 compression
 - **Compaction** (`engine/compaction.rs`): Background merging of SSTables
+- **Retention Manager** (`storage/retention_manager.rs`): Dynamic retention policy management with JSON persistence
 
 **Data Flow**:
 1. MQTT message arrives → parsed into `Frame`
@@ -117,7 +118,13 @@ cargo run
 
 **API Layer** (`src/api/`):
 - `http.rs`: Axum HTTP server with optional TLS (use reverse proxy in production)
-- `handlers.rs`: REST endpoints (`/health`, `/query`, `/devices`, `/devices/:dev_eui`, `/tokens`)
+- `handlers.rs`: REST endpoints
+  - `/health` - Health check
+  - `/query` - Query DSL execution
+  - `/devices`, `/devices/:dev_eui` - Device management
+  - `/tokens` - API token management
+  - `/retention/policies` - Retention policy management (NEW)
+  - `/retention/enforce` - Immediate enforcement trigger (NEW)
 - `middleware.rs`: Dual authentication (JWT + API tokens), security headers, CORS
 
 **Security** (`src/security/`):
@@ -236,6 +243,84 @@ LoRaDB supports two authentication methods:
 
 See **API_TOKEN_GUIDE.md** for detailed usage examples and best practices.
 
+## Retention Policy Management
+
+LoRaDB supports flexible data retention policies that can be managed both via environment variables (legacy) and REST API (dynamic).
+
+### Configuration Methods
+
+**1. Environment Variables (Legacy, still supported):**
+- `LORADB_STORAGE_RETENTION_DAYS` - Global default retention period in days
+- `LORADB_STORAGE_RETENTION_APPS` - Per-application policies (format: `"app1:30,app2:365,app3:never"`)
+- `LORADB_STORAGE_RETENTION_CHECK_INTERVAL_HOURS` - Enforcement frequency (default: 24)
+
+**2. REST API (Dynamic, preferred):**
+- Policies persisted in `<data_dir>/retention_policies.json`
+- API takes precedence over environment variables
+- No server restart required for policy changes
+- Module: `src/storage/retention_manager.rs`
+
+### API Endpoints
+
+**List All Policies:**
+```
+GET /retention/policies
+```
+Returns global policy, check interval, and all application-specific policies.
+
+**Global Policy Management:**
+```
+GET /retention/policies/global       # Get global retention days
+PUT /retention/policies/global       # Set global policy: {"days": 90} or {"days": null} for "never"
+```
+
+**Application-Specific Policies:**
+```
+GET /retention/policies/:app_id      # Get policy for specific application
+PUT /retention/policies/:app_id      # Set policy: {"days": 30} or {"days": null} for "never"
+DELETE /retention/policies/:app_id   # Remove policy (falls back to global)
+```
+
+**Immediate Enforcement:**
+```
+POST /retention/enforce              # Trigger retention enforcement now (instead of waiting for scheduled run)
+```
+
+### Implementation Details
+
+**Module**: `src/storage/retention_manager.rs`
+- **RetentionPolicyManager**: Manages policies with JSON persistence
+- **RetentionPolicies**: Struct containing global_days, applications map, check_interval_hours
+- **RetentionPolicy**: Per-app policy with days, created_at, updated_at timestamps
+
+**Integration**: `src/storage/mod.rs`
+- Storage engine holds `Arc<RetentionPolicyManager>`
+- `enforce_retention()` method (public, can be called via API)
+- Background task runs periodically based on check_interval_hours
+- Deletion logic unchanged (conservative approach using longest retention period)
+
+**Backward Compatibility:**
+- On first startup: reads env vars → writes to JSON file
+- If JSON exists: JSON takes precedence
+- If neither exists: no retention (keep forever)
+
+**Example Usage:**
+```rust
+// Get retention manager from storage engine
+let retention_manager = storage.retention_manager();
+
+// Set global policy to 90 days
+retention_manager.set_global(Some(90)).await?;
+
+// Set application-specific policy
+retention_manager.set_application("test-sensors".to_string(), Some(7)).await?;
+
+// Trigger immediate enforcement
+storage.enforce_retention().await?;
+```
+
+See **README.md** section "API-Based Retention Management" for curl examples.
+
 ## Important Implementation Details
 
 ### Concurrency Model
@@ -309,7 +394,9 @@ src/
 ├── lib.rs               # Library exports
 ├── config.rs            # Environment-based configuration
 ├── error.rs             # Custom error types
-├── storage.rs           # Storage engine orchestration
+├── storage/             # Storage engine module
+│   ├── mod.rs          # Storage engine orchestration
+│   └── retention_manager.rs  # Retention policy management with JSON persistence
 ├── engine/              # LSM-tree components
 │   ├── wal.rs          # Write-Ahead Log with CRC32
 │   ├── memtable.rs     # In-memory skiplist

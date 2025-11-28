@@ -14,6 +14,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
+pub mod retention_manager;
+
+use retention_manager::RetentionPolicyManager;
+
 /// Storage engine that manages WAL, memtable, SSTables, and compaction
 pub struct StorageEngine {
     data_dir: PathBuf,
@@ -22,6 +26,7 @@ pub struct StorageEngine {
     sstables: Arc<RwLock<Vec<SSTableReader>>>,
     compaction_manager: Arc<RwLock<CompactionManager>>,
     device_registry: Arc<DeviceRegistry>,
+    retention_manager: Arc<RetentionPolicyManager>,
     config: StorageConfig,
 }
 
@@ -116,6 +121,15 @@ impl StorageEngine {
             device_count
         );
 
+        // Initialize retention policy manager from environment variables
+        let retention_manager = RetentionPolicyManager::from_env(
+            &data_dir,
+            config.retention_days,
+            config.retention_apps.clone(),
+            config.retention_check_interval_hours,
+        )
+        .await?;
+
         Ok(Self {
             data_dir,
             wal: Arc::new(RwLock::new(wal)),
@@ -123,6 +137,7 @@ impl StorageEngine {
             sstables: Arc::new(RwLock::new(sstables)),
             compaction_manager: Arc::new(RwLock::new(compaction_manager)),
             device_registry,
+            retention_manager: Arc::new(retention_manager),
             config,
         })
     }
@@ -322,6 +337,11 @@ impl StorageEngine {
         &self.device_registry
     }
 
+    /// Get retention policy manager
+    pub fn retention_manager(&self) -> &Arc<RetentionPolicyManager> {
+        &self.retention_manager
+    }
+
     /// Start background processing of frames from MQTT
     pub async fn start_frame_processor(
         self: Arc<Self>,
@@ -385,9 +405,12 @@ impl StorageEngine {
 
     /// Enforce retention policy by deleting data older than configured retention period
     /// Supports both global and per-application retention policies
-    async fn enforce_retention(&self) -> Result<()> {
+    pub async fn enforce_retention(&self) -> Result<()> {
+        // Get current policies from manager
+        let policies = self.retention_manager.get_policies().await;
+
         // Check if any retention policy is configured
-        if self.config.retention_days.is_none() && self.config.retention_apps.is_empty() {
+        if policies.global_days.is_none() && policies.applications.is_empty() {
             debug!("No retention policy configured, skipping");
             return Ok(());
         }
@@ -425,11 +448,11 @@ impl StorageEngine {
 
                 for app_id in &app_ids {
                     // Check for per-application policy first
-                    let retention_days = if let Some(policy) = self.config.retention_apps.get(app_id) {
-                        match policy {
+                    let retention_days = if let Some(policy) = policies.applications.get(app_id) {
+                        match policy.days {
                             Some(days) => {
                                 policy_source = format!("app:{}", app_id);
-                                Some(*days)
+                                Some(days)
                             },
                             None => {
                                 // "never" - keep forever for this app
@@ -440,7 +463,7 @@ impl StorageEngine {
                     } else {
                         // Fall back to global default
                         policy_source = "global".to_string();
-                        self.config.retention_days
+                        policies.global_days
                     };
 
                     // Track the shortest retention period
@@ -495,23 +518,19 @@ impl StorageEngine {
 
     /// Start periodic retention policy enforcement task
     /// Returns a JoinHandle that can be aborted on shutdown
-    pub fn start_retention_enforcement(self: Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
-        // Only start if retention policy is configured
-        let retention_days = self.config.retention_days?;
-        let check_interval_hours = self.config.retention_check_interval_hours;
+    pub fn start_retention_enforcement(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        info!("Starting retention enforcement background task");
 
-        info!(
-            "Starting retention enforcement (policy: {} days, check interval: {} hours)",
-            retention_days, check_interval_hours
-        );
-
-        Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(
-                tokio::time::Duration::from_secs(check_interval_hours * 3600)
-            );
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+        tokio::spawn(async move {
             loop {
+                // Get current check interval from retention manager
+                let check_interval_hours = self.retention_manager.get_check_interval_hours().await;
+
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(check_interval_hours * 3600)
+                );
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
                 interval.tick().await;
 
                 info!("Running retention policy enforcement");
@@ -521,7 +540,7 @@ impl StorageEngine {
                     info!("Retention enforcement completed");
                 }
             }
-        }))
+        })
     }
 
     /// Gracefully shut down storage engine by flushing memtable to SSTable

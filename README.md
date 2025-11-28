@@ -575,6 +575,83 @@ Multiple policies are comma-separated:
 LORADB_STORAGE_RETENTION_APPS="app1:30,app2:90,app3:never,app4:7"
 ```
 
+### API-Based Retention Management
+
+**NEW:** Retention policies can now be managed dynamically via REST API without server restart!
+
+#### List All Policies
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/retention/policies
+```
+
+Response:
+```json
+{
+  "global_days": 90,
+  "check_interval_hours": 24,
+  "applications": [
+    {
+      "application_id": "production",
+      "days": 365,
+      "created_at": "2025-01-26T12:00:00Z",
+      "updated_at": "2025-01-26T12:00:00Z"
+    }
+  ]
+}
+```
+
+#### Get/Set Global Retention Policy
+```bash
+# Get global policy
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/retention/policies/global
+
+# Set global policy to 90 days
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"days": 90}' \
+  http://localhost:8080/retention/policies/global
+
+# Set to "never" (keep forever)
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"days": null}' \
+  http://localhost:8080/retention/policies/global
+```
+
+#### Manage Application-Specific Policies
+```bash
+# Set retention for specific application
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"days": 30}' \
+  http://localhost:8080/retention/policies/test-sensors
+
+# Get application-specific policy
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/retention/policies/test-sensors
+
+# Remove application policy (falls back to global)
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/retention/policies/test-sensors
+```
+
+#### Trigger Immediate Enforcement
+```bash
+# Run retention enforcement immediately (instead of waiting for scheduled run)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/retention/enforce
+```
+
+**Benefits:**
+- **No Restart Required**: Update policies on the fly
+- **Auditable**: Track when policies were created/updated
+- **Integration-Friendly**: Automate retention management via API
+- **Backward Compatible**: Environment variables still work; API takes precedence
+
+**Storage Location**: Policies are persisted in `<data_dir>/retention_policies.json`
+
 ## Edge Deployment
 
 LoRaDB is designed for edge compatibility:
