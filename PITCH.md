@@ -794,6 +794,132 @@ GROUP BY building
 - ✅ Efficiency: 50-70% less resources
 - ✅ Focus: Does one thing exceptionally well
 
+### The Application-Level Aggregation Philosophy
+
+**LoRaDB deliberately omits built-in aggregations.** This is not a missing feature—it's a conscious architectural decision based on the reality of LoRaWAN deployments.
+
+**Why Aggregation Belongs in the Application Layer:**
+
+**1. Raw Data Preserves Network Truth**
+```
+Database aggregation hides problems:
+AVG(rssi=-120, -115, -50, -118) = -100.75  ← Looks acceptable!
+
+Raw data reveals the issue:
+Frame 1: rssi=-120 (weak)
+Frame 2: rssi=-115 (weak)
+Frame 3: rssi=-50  (ANOMALY: gateway malfunction or interference)
+Frame 4: rssi=-118 (weak)
+```
+
+Aggregating in the database loses the outlier that indicates a network problem.
+
+**2. Separation of Concerns**
+```
+┌─────────────────────────────────────────────┐
+│ LoRaDB: Storage & Retrieval                │
+│ - Fast device queries                       │
+│ - Raw frame storage                         │
+│ - Time-range filtering                      │
+└─────────────────┬───────────────────────────┘
+                  │
+                  ↓ Raw JSON frames
+┌─────────────────────────────────────────────┐
+│ Application Layer: Analytics & Viz          │
+│ - Grafana: Time-series aggregations         │
+│ - Pandas: Statistical analysis              │
+│ - Custom dashboards: Business logic         │
+│ - ML pipelines: Anomaly detection           │
+└─────────────────────────────────────────────┘
+```
+
+Each layer does what it does best:
+- **LoRaDB**: Optimized storage and retrieval
+- **Application**: Context-aware aggregations
+
+**3. Flexibility for Different Use Cases**
+
+The same raw data can be aggregated differently based on context:
+
+```python
+# Network operations: Identify poor coverage
+frames = loradb.query("SELECT rx_info[0].rssi FROM device 'ABC123' WHERE LAST '7d'")
+weak_coverage = [f for f in frames if f['rssi'] < -115]
+alert_if_threshold_exceeded(weak_coverage)
+
+# Facilities management: Daily average temperature
+frames = loradb.query("SELECT decoded_payload.object.temp FROM device 'ABC123' WHERE LAST '30d'")
+daily_avg = pd.DataFrame(frames).groupby(pd.Grouper(freq='D')).mean()
+
+# Compliance reporting: Min/max for month
+frames = loradb.query("SELECT decoded_payload.object.co2 FROM device 'ABC123' WHERE LAST '30d'")
+report = {
+    'max': max(f['co2'] for f in frames),
+    'min': min(f['co2'] for f in frames),
+    'violations': [f for f in frames if f['co2'] > 1000]
+}
+```
+
+Same data, three different aggregation strategies. Implementing all of this in the database would create a bloated, complex query language.
+
+**4. Tooling Already Exists**
+
+Modern analytics tools are purpose-built for aggregation:
+
+- **Grafana**: Time-series transformations, multi-query aggregations, alerting
+- **Jupyter/Pandas**: Statistical analysis, ML, custom visualizations
+- **Apache Superset**: Business intelligence, interactive dashboards
+- **Elasticsearch**: Full-text search, complex aggregations (if needed)
+
+Why reinvent the wheel when LoRaDB can feed these tools with fast, raw data?
+
+**Example: Grafana Dashboard**
+```
+LoRaDB Query Panel:
+  Query: SELECT decoded_payload.object.temperature
+         FROM device 'ABC123'
+         WHERE LAST '24h'
+
+Grafana Transformations:
+  1. Group by time (1h buckets)
+  2. Calculate mean per bucket
+  3. Add threshold alert (> 30°C)
+  4. Display on time-series graph
+
+Result: Aggregated visualization without database complexity
+```
+
+**5. Performance Trade-off**
+
+Adding aggregations to LoRaDB would compromise its core strength:
+
+```
+With Aggregations:
+- Complex query planner needed
+- Index strategy becomes conflicted (device-first vs. time-first)
+- Write performance decreases (maintain aggregation indexes)
+- Memory footprint increases (materialized views, pre-aggregations)
+
+Current Design:
+- Simple, predictable queries
+- Single-purpose indexing (device-first)
+- Maximum write throughput
+- Minimal resource usage
+```
+
+**The Verdict:**
+
+LoRaDB is a **retrieval engine**, not an analytics platform. It excels at:
+- ✅ "Give me all frames from device X in time range Y" (milliseconds)
+- ✅ "Extract nested field Z from those frames" (zero overhead)
+
+It delegates to specialized tools:
+- ❌ "Average temperature across 1000 devices" → Grafana
+- ❌ "Detect anomalies in sensor readings" → Python/ML pipeline
+- ❌ "Compliance report with min/max/percentiles" → Pandas
+
+This architectural separation keeps LoRaDB fast, simple, and focused on what it does best: being the fastest way to retrieve LoRaWAN device history.
+
 ---
 
 ## Future Roadmap
@@ -802,9 +928,9 @@ GROUP BY building
 
 **Q2 2025:**
 - [ ] Multi-device queries with device patterns
-- [ ] Aggregation support (opt-in)
 - [ ] Grafana native data source plugin
 - [ ] Horizontal scaling (sharding by DevEUI)
+- [ ] Streaming query API (WebSocket/SSE for real-time)
 
 **Q3 2025:**
 - [ ] Built-in alerting engine
