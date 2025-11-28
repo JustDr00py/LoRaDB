@@ -44,8 +44,11 @@ impl QueryExecutor {
                 // Unwrap enum variant for easier querying (e.g., {"Uplink": {...}} -> {...})
                 let unwrapped_json = self.unwrap_frame_variant(json);
 
+                // Unwrap stringified decoded_payload.object (handles old data and bincode format)
+                let decoded_json = self.unwrap_decoded_payload(unwrapped_json);
+
                 // Apply field projection if needed
-                self.project_fields(unwrapped_json, &query.select)
+                self.project_fields(decoded_json, &query.select)
             })
             .collect();
 
@@ -105,7 +108,7 @@ impl QueryExecutor {
         }
     }
 
-    /// Get a nested field using dot notation (e.g., "decoded_payload.co2")
+    /// Get a nested field using dot notation (e.g., "decoded_payload.object.co2")
     fn get_nested_field<'a>(&self, json: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
         let mut current = json;
         for segment in path.split('.') {
@@ -132,6 +135,27 @@ impl QueryExecutor {
         } else {
             json
         }
+    }
+
+    /// Unwrap stringified decoded_payload.object fields
+    /// This handles both old double-encoded data and the bincode serialization format
+    fn unwrap_decoded_payload(&self, mut json: serde_json::Value) -> serde_json::Value {
+        if let serde_json::Value::Object(ref mut map) = json {
+            // Check if this frame has a decoded_payload field
+            if let Some(decoded_payload) = map.get_mut("decoded_payload") {
+                if let serde_json::Value::Object(ref mut dp_map) = decoded_payload {
+                    // Check if object field is a string (double-encoded)
+                    if let Some(serde_json::Value::String(object_str)) = dp_map.get("object") {
+                        // Try to parse the string as JSON
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(object_str) {
+                            tracing::debug!("Unwrapping stringified decoded_payload.object for query");
+                            dp_map.insert("object".to_string(), parsed);
+                        }
+                    }
+                }
+            }
+        }
+        json
     }
 }
 
@@ -454,5 +478,61 @@ mod tests {
             executor.get_nested_field(&json, "level1.nonexistent"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn test_unwrap_double_encoded_payload() {
+        use crate::model::decoded::DecodedPayload;
+        use serde_json::json;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(temp_dir.path());
+        let storage = Arc::new(StorageEngine::new(config).await.unwrap());
+        let executor = QueryExecutor::new(storage.clone());
+
+        // Create uplink with double-encoded JSON string (simulating old data)
+        let dev_eui_str = "a84041c7a1881438";
+        let double_encoded_str = r#"{"BatV":3.071,"Bat_status":3.0,"TempC_SHT":14.96}"#;
+        let decoded = DecodedPayload::from_json(json!(double_encoded_str));
+
+        let frame = Frame::Uplink(UplinkFrame {
+            dev_eui: DevEui::new(dev_eui_str.to_string()).unwrap(),
+            application_id: ApplicationId::new("test-app".to_string()),
+            device_name: Some("test-device".to_string()),
+            received_at: Utc::now(),
+            f_port: 2,
+            f_cnt: 4186,
+            confirmed: false,
+            adr: true,
+            dr: DataRate::new_lora(125000, 3),
+            frequency: 904700000,
+            rx_info: vec![],
+            decoded_payload: Some(decoded),
+            raw_payload: Some("y/8F2AJdAX//f/8=".to_string()),
+        });
+
+        storage.write(frame).await.unwrap();
+
+        // Query for specific nested field
+        let query = Query::new(
+            SelectClause::Fields(vec![
+                "decoded_payload.object.BatV".to_string(),
+                "decoded_payload.object.Bat_status".to_string(),
+                "decoded_payload.object.TempC_SHT".to_string(),
+            ]),
+            FromClause {
+                dev_eui: dev_eui_str.to_string(),
+            },
+            None,
+        );
+
+        let result = executor.execute(&query).await.unwrap();
+        assert_eq!(result.total_frames, 1);
+
+        // Verify the unwrapped fields are accessible
+        let frame_json = &result.frames[0];
+        assert_eq!(frame_json["decoded_payload.object.BatV"], json!(3.071));
+        assert_eq!(frame_json["decoded_payload.object.Bat_status"], json!(3.0));
+        assert_eq!(frame_json["decoded_payload.object.TempC_SHT"], json!(14.96));
     }
 }
