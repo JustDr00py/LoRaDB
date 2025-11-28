@@ -14,6 +14,7 @@ LoRaDB is a specialized database built from scratch in Rust for storing and quer
 - **Bloom Filters**: Probabilistic membership testing (1% false positive rate)
 - **LZ4 Compression**: Efficient SSTable storage
 - **AES-256-GCM Encryption**: Optional data-at-rest encryption with key zeroization
+- **Flexible Retention Policies**: Global default + per-application retention with automatic enforcement
 
 ### MQTT Ingestion
 - **Dual Network Support**: ChirpStack v4 and The Things Network v3
@@ -38,14 +39,18 @@ SELECT received_at, f_port, decoded_payload.object.temperature FROM device '0123
 ```
 
 ### HTTP/HTTPS API
-- **JWT Authentication**: HS256 tokens with 1-hour expiration
+- **Dual Authentication**: JWT tokens (short-lived) + API tokens (long-lived, revocable)
+- **CORS Support**: Configurable cross-origin resource sharing for web dashboards
 - **Security Headers**: HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
 - **TLS Support**: Optional built-in TLS (use reverse proxy recommended for production)
 - **RESTful Endpoints**:
   - `GET /health` - Health check (no auth)
-  - `POST /query` - Execute queries (JWT required)
-  - `GET /devices` - List devices (JWT required)
-  - `GET /devices/:dev_eui` - Device info (JWT required)
+  - `POST /query` - Execute queries (auth required)
+  - `GET /devices` - List devices (auth required)
+  - `GET /devices/:dev_eui` - Device info (auth required)
+  - `POST /tokens` - Create API token (auth required)
+  - `GET /tokens` - List API tokens (auth required)
+  - `DELETE /tokens/:token_id` - Revoke API token (auth required)
 
 ## Installation
 
@@ -270,6 +275,11 @@ LORADB_STORAGE_MEMTABLE_SIZE_MB=64
 LORADB_STORAGE_MEMTABLE_FLUSH_INTERVAL_SECS=300  # Periodic flush every 5 minutes
 LORADB_STORAGE_COMPACTION_THRESHOLD=10
 
+# Data Retention Policies (optional - defaults to keep forever)
+LORADB_STORAGE_RETENTION_DAYS=90  # Global default: delete data older than 90 days
+LORADB_STORAGE_RETENTION_APPS="test-app:7,production:365,critical:never"  # Per-application policies
+LORADB_STORAGE_RETENTION_CHECK_INTERVAL_HOURS=24  # How often to enforce retention
+
 # Encryption (optional)
 LORADB_STORAGE_ENABLE_ENCRYPTION=true
 LORADB_STORAGE_ENCRYPTION_KEY=base64-encoded-32-byte-key
@@ -277,6 +287,7 @@ LORADB_STORAGE_ENCRYPTION_KEY=base64-encoded-32-byte-key
 # API Tuning
 LORADB_API_JWT_EXPIRATION_HOURS=1  # JWT token expiration in hours (default: 1)
 LORADB_API_RATE_LIMIT_PER_MINUTE=100
+LORADB_API_CORS_ALLOWED_ORIGINS=*  # CORS allowed origins (* for dev, specific domains for prod)
 ```
 
 ## Usage
@@ -416,7 +427,8 @@ curl https://localhost:8443/devices/0123456789ABCDEF \
 
 ### Mandatory Security Features
 - ✅ **TLS 1.2+** for MQTT and HTTPS
-- ✅ **JWT Authentication** (HS256)
+- ✅ **Dual Authentication** (JWT + API tokens with revocation)
+- ✅ **Configurable CORS** with origin restrictions
 - ✅ **Security Headers**: HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
 - ✅ **AES-256-GCM** encryption-at-rest (optional)
 - ✅ **Key Zeroization** on drop
@@ -427,9 +439,17 @@ curl https://localhost:8443/devices/0123456789ABCDEF \
 1. **Generate strong JWT secrets**: `openssl rand -base64 32`
 2. **Use proper TLS certificates**: Let's Encrypt or internal CA
 3. **Enable encryption**: Set `LORADB_STORAGE_ENABLE_ENCRYPTION=true`
-4. **Restrict CORS**: Update `middleware.rs` for production origins
-5. **Monitor logs**: Use structured JSON logging
-6. **Rate limiting**: Configure per deployment needs
+4. **Restrict CORS origins**:
+   ```bash
+   # Development (allow all)
+   LORADB_API_CORS_ALLOWED_ORIGINS=*
+
+   # Production (specific origins only)
+   LORADB_API_CORS_ALLOWED_ORIGINS=https://dashboard.example.com,https://admin.example.com
+   ```
+5. **Use API tokens for dashboards**: Long-lived, revocable tokens for automation
+6. **Monitor logs**: Use structured JSON logging
+7. **Rate limiting**: Configure per deployment needs
 
 ## Testing
 
@@ -479,6 +499,81 @@ LORADB_STORAGE_COMPACTION_THRESHOLD=20
 - **Write Throughput**: ~10,000 frames/sec (unencrypted), ~5,000 frames/sec (encrypted)
 - **Query Latency**: <100ms for 1M frames, device-scoped
 - **Storage Efficiency**: ~60% compression ratio with LZ4
+
+## Data Retention Policies
+
+LoRaDB supports flexible retention policies to automatically delete old data based on configured retention periods. This enables compliance with data retention requirements, cost optimization, and privacy regulations.
+
+### Global Default Retention
+
+Set a default retention period for all applications:
+
+```bash
+# Delete all data older than 90 days
+LORADB_STORAGE_RETENTION_DAYS=90
+
+# Check and enforce retention policy daily
+LORADB_STORAGE_RETENTION_CHECK_INTERVAL_HOURS=24
+```
+
+### Per-Application Retention
+
+Override the global default with application-specific policies:
+
+```bash
+# Global default: 90 days
+LORADB_STORAGE_RETENTION_DAYS=90
+
+# Per-application overrides
+LORADB_STORAGE_RETENTION_APPS="test-sensors:7,production:365,fire-alarms:never"
+```
+
+### Use Cases
+
+**Development vs Production:**
+```bash
+LORADB_STORAGE_RETENTION_APPS="dev:7,staging:14,test:7,production:365"
+```
+
+**Privacy Compliance (GDPR/HIPAA):**
+```bash
+# Occupancy data (30 days for privacy)
+# HVAC data (1 year for energy analysis)
+# Fire alarms (forever for compliance)
+LORADB_STORAGE_RETENTION_APPS="occupancy:30,hvac:365,fire-alarms:never,smoke-alarms:never"
+```
+
+**Multi-Tenant SaaS:**
+```bash
+# Different retention tiers for different customers
+LORADB_STORAGE_RETENTION_APPS="customer-basic:30,customer-premium:365,customer-enterprise:730"
+```
+
+**Cost Optimization:**
+```bash
+# Quick cleanup for test data, longer retention for production analytics
+LORADB_STORAGE_RETENTION_APPS="test:3,staging:7,prod-monitoring:90,prod-analytics:365"
+```
+
+### How It Works
+
+1. **Application Policy Lookup**: For each SSTable, retrieves all application IDs it contains
+2. **Policy Resolution**: Checks per-application policy → falls back to global default
+3. **Conservative Deletion**: Uses the longest retention period among all apps in the SSTable
+4. **Never Override**: If any application is set to `never`, the entire SSTable is preserved
+5. **Automatic Enforcement**: Background task runs at configured interval (default: 24 hours)
+
+### Retention Policy Format
+
+```
+application-id:days        Delete after specified days
+application-id:never       Keep forever (never delete)
+```
+
+Multiple policies are comma-separated:
+```bash
+LORADB_STORAGE_RETENTION_APPS="app1:30,app2:90,app3:never,app4:7"
+```
 
 ## Edge Deployment
 
@@ -608,11 +703,9 @@ curl -k https://localhost:8443/health
 - ❌ No WASM/JavaScript payload decoders (use pre-decoded from network server)
 - ❌ No clustering/replication (single-node only)
 - ❌ No time-series aggregation functions (use external tools)
-- ❌ No data retention policies (manual cleanup required)
 
 ### Future Enhancements
 - [ ] Multi-node clustering
-- [ ] Retention policies
 - [ ] Aggregate functions (AVG, MIN, MAX, COUNT)
 - [ ] Grafana datasource plugin
 - [ ] Prometheus metrics exporter
