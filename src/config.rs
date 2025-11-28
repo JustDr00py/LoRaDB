@@ -34,6 +34,8 @@ pub struct StorageConfig {
     pub compaction_threshold: usize,
     pub enable_encryption: bool,
     pub encryption_key: Option<String>,
+    pub retention_days: Option<u32>,
+    pub retention_check_interval_hours: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +80,11 @@ impl Config {
             )?,
         };
 
+        // Parse retention policy (optional - None means keep data forever)
+        let retention_days = env::var("LORADB_STORAGE_RETENTION_DAYS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok());
+
         let storage = StorageConfig {
             data_dir: parse_env_path(
                 "LORADB_STORAGE_DATA_DIR",
@@ -101,6 +108,11 @@ impl Config {
                 false,
             )?,
             encryption_key: env::var("LORADB_STORAGE_ENCRYPTION_KEY").ok(),
+            retention_days,
+            retention_check_interval_hours: parse_env(
+                "LORADB_STORAGE_RETENTION_CHECK_INTERVAL_HOURS",
+                24,  // Check once per day by default
+            )?,
         };
 
         // Validate encryption configuration

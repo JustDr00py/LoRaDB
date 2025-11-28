@@ -65,6 +65,14 @@ async fn main() -> Result<()> {
     info!("Starting periodic memtable flush task");
     let flush_handle = storage.clone().start_periodic_flush();
 
+    // Start periodic retention enforcement (if configured)
+    let retention_handle = storage.clone().start_retention_enforcement();
+    if retention_handle.is_some() {
+        info!("Retention policy enforcement task started");
+    } else {
+        info!("No retention policy configured");
+    }
+
     // Initialize MQTT ingestion
     let mqtt_handle = if config.mqtt.chirpstack_broker.is_some() || config.mqtt.ttn_broker.is_some() {
         info!("Initializing MQTT ingestion");

@@ -482,6 +482,12 @@ impl SSTableReader {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Get the maximum timestamp in this SSTable (for retention policy)
+    pub fn max_timestamp(&self) -> Option<DateTime<Utc>> {
+        // Convert microseconds timestamp to DateTime
+        DateTime::from_timestamp_micros(self.metadata.max_key.timestamp)
+    }
 }
 
 #[cfg(test)]

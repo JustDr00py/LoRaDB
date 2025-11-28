@@ -383,6 +383,100 @@ impl StorageEngine {
         })
     }
 
+    /// Enforce retention policy by deleting data older than configured retention period
+    async fn enforce_retention(&self) -> Result<()> {
+        // Check if retention policy is configured
+        let retention_days = match self.config.retention_days {
+            Some(days) => days,
+            None => {
+                debug!("No retention policy configured, skipping");
+                return Ok(());
+            }
+        };
+
+        let cutoff_time = Utc::now() - chrono::Duration::days(retention_days as i64);
+        info!(
+            "Enforcing retention policy: deleting data older than {} days (cutoff: {})",
+            retention_days, cutoff_time
+        );
+
+        // Find SSTables that are entirely older than the cutoff
+        let sstables_to_delete: Vec<u64> = {
+            let sstables = self.sstables.read().await;
+            sstables
+                .iter()
+                .filter(|sstable| {
+                    // Check if the SSTable's max timestamp is older than cutoff
+                    if let Some(max_time) = sstable.max_timestamp() {
+                        max_time < cutoff_time
+                    } else {
+                        false
+                    }
+                })
+                .map(|sstable| sstable.id())
+                .collect()
+        };
+
+        if sstables_to_delete.is_empty() {
+            debug!("No SSTables to delete for retention policy");
+            return Ok(());
+        }
+
+        info!(
+            "Deleting {} SSTable(s) to enforce retention policy",
+            sstables_to_delete.len()
+        );
+
+        // Delete the old SSTables
+        for sstable_id in sstables_to_delete {
+            // Remove from in-memory list
+            {
+                let mut sstables = self.sstables.write().await;
+                sstables.retain(|s| s.id() != sstable_id);
+            }
+
+            // Delete the file
+            let sstable_path = self.data_dir.join(format!("{}.sst", sstable_id));
+            match tokio::fs::remove_file(&sstable_path).await {
+                Ok(_) => info!("Deleted SSTable {} (retention policy)", sstable_id),
+                Err(e) => warn!("Failed to delete SSTable {}: {}", sstable_id, e),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Start periodic retention policy enforcement task
+    /// Returns a JoinHandle that can be aborted on shutdown
+    pub fn start_retention_enforcement(self: Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+        // Only start if retention policy is configured
+        let retention_days = self.config.retention_days?;
+        let check_interval_hours = self.config.retention_check_interval_hours;
+
+        info!(
+            "Starting retention enforcement (policy: {} days, check interval: {} hours)",
+            retention_days, check_interval_hours
+        );
+
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(
+                tokio::time::Duration::from_secs(check_interval_hours * 3600)
+            );
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                info!("Running retention policy enforcement");
+                if let Err(e) = self.enforce_retention().await {
+                    warn!("Retention enforcement failed: {}", e);
+                } else {
+                    info!("Retention enforcement completed");
+                }
+            }
+        }))
+    }
+
     /// Gracefully shut down storage engine by flushing memtable to SSTable
     pub async fn shutdown(&self) -> Result<()> {
         info!("Shutting down storage engine");
@@ -425,6 +519,8 @@ mod tests {
             compaction_threshold: 3,
             enable_encryption: false,
             encryption_key: None,
+            retention_days: None,
+            retention_check_interval_hours: 24,
         }
     }
 

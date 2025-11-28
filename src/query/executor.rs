@@ -178,6 +178,8 @@ mod tests {
             compaction_threshold: 3,
             enable_encryption: false,
             encryption_key: None,
+            retention_days: None,
+            retention_check_interval_hours: 24,
         }
     }
 
