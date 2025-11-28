@@ -1,5 +1,6 @@
 use crate::error::LoraDbError;
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -35,6 +36,7 @@ pub struct StorageConfig {
     pub enable_encryption: bool,
     pub encryption_key: Option<String>,
     pub retention_days: Option<u32>,
+    pub retention_apps: HashMap<String, Option<u32>>,
     pub retention_check_interval_hours: u64,
 }
 
@@ -85,6 +87,30 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<u32>().ok());
 
+        // Parse per-application retention policies
+        // Format: "app1:30,app2:90,app3:never"
+        let retention_apps = env::var("LORADB_STORAGE_RETENTION_APPS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|entry| {
+                        let parts: Vec<&str> = entry.trim().split(':').collect();
+                        if parts.len() == 2 {
+                            let app_id = parts[0].trim().to_string();
+                            let days = if parts[1].trim().eq_ignore_ascii_case("never") {
+                                None  // "never" means keep forever
+                            } else {
+                                parts[1].trim().parse::<u32>().ok()
+                            };
+                            Some((app_id, days))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<HashMap<String, Option<u32>>>()
+            })
+            .unwrap_or_default();
+
         let storage = StorageConfig {
             data_dir: parse_env_path(
                 "LORADB_STORAGE_DATA_DIR",
@@ -109,6 +135,7 @@ impl Config {
             )?,
             encryption_key: env::var("LORADB_STORAGE_ENCRYPTION_KEY").ok(),
             retention_days,
+            retention_apps,
             retention_check_interval_hours: parse_env(
                 "LORADB_STORAGE_RETENTION_CHECK_INTERVAL_HOURS",
                 24,  // Check once per day by default

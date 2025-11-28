@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use crc32fast::Hasher;
 use lz4::{Decoder, EncoderBuilder};
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ pub struct SSTableMetadata {
     pub bloom_filter: BloomFilter,
     pub data_size_bytes: u64,
     pub compressed_size_bytes: u64,
+    pub application_ids: HashSet<String>,
 }
 
 /// SSTable index entry for fast lookups
@@ -47,6 +49,7 @@ pub struct SSTableWriter {
     output_path: PathBuf,
     entries: Vec<(MemtableKey, Frame)>,
     bloom_filter: BloomFilter,
+    application_ids: HashSet<String>,
 }
 
 impl SSTableWriter {
@@ -61,6 +64,7 @@ impl SSTableWriter {
             output_path,
             entries: Vec::new(),
             bloom_filter,
+            application_ids: HashSet::new(),
         }
     }
 
@@ -78,6 +82,11 @@ impl SSTableWriter {
 
         // Add to bloom filter
         self.bloom_filter.insert(&key.dev_eui);
+
+        // Track application ID for retention policy
+        if let Some(app_id) = frame.application_id() {
+            self.application_ids.insert(app_id.as_str().to_string());
+        }
 
         self.entries.push((key, frame));
         Ok(())
@@ -221,6 +230,7 @@ impl SSTableWriter {
             bloom_filter: self.bloom_filter,
             data_size_bytes,
             compressed_size_bytes,
+            application_ids: self.application_ids,
         })
     }
 }
@@ -351,6 +361,7 @@ impl SSTableReader {
             bloom_filter,
             data_size_bytes: 0, // Not stored in file
             compressed_size_bytes: 0,
+            application_ids: HashSet::new(), // Will be populated lazily if needed for retention
         };
 
         debug!("Opened SSTable {} with {} entries", id, num_entries);
@@ -487,6 +498,25 @@ impl SSTableReader {
     pub fn max_timestamp(&self) -> Option<DateTime<Utc>> {
         // Convert microseconds timestamp to DateTime
         DateTime::from_timestamp_micros(self.metadata.max_key.timestamp)
+    }
+
+    /// Get all application IDs in this SSTable (for retention policy)
+    /// Scans the SSTable if not already populated in metadata
+    pub fn application_ids(&self) -> Result<HashSet<String>> {
+        // If already populated (from new SSTables), return it
+        if !self.metadata.application_ids.is_empty() {
+            return Ok(self.metadata.application_ids.clone());
+        }
+
+        // Otherwise, scan the SSTable to build the set
+        let mut app_ids = HashSet::new();
+        for frame in self.iter_all()? {
+            if let Some(app_id) = frame.application_id() {
+                app_ids.insert(app_id.as_str().to_string());
+            }
+        }
+
+        Ok(app_ids)
     }
 }
 

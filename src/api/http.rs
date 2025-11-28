@@ -158,6 +158,7 @@ impl HttpServer {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use super::*;
     use crate::config::StorageConfig;
     use crate::security::jwt::Claims;
@@ -180,6 +181,7 @@ mod tests {
             enable_encryption: false,
             encryption_key: None,
             retention_days: None,
+            retention_apps: HashMap::new(),
             retention_check_interval_hours: 24,
         };
 
@@ -304,6 +306,7 @@ mod tests {
             enable_encryption: false,
             encryption_key: None,
             retention_days: None,
+            retention_apps: HashMap::new(),
             retention_check_interval_hours: 24,
         };
 

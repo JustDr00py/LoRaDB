@@ -289,6 +289,7 @@ pub async fn revoke_token(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use super::*;
     use crate::config::StorageConfig;
     use crate::model::frames::UplinkFrame;
@@ -307,6 +308,7 @@ mod tests {
             enable_encryption: false,
             encryption_key: None,
             retention_days: None,
+            retention_apps: HashMap::new(),
             retention_check_interval_hours: 24,
         };
 

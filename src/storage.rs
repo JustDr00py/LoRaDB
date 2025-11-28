@@ -384,37 +384,84 @@ impl StorageEngine {
     }
 
     /// Enforce retention policy by deleting data older than configured retention period
+    /// Supports both global and per-application retention policies
     async fn enforce_retention(&self) -> Result<()> {
-        // Check if retention policy is configured
-        let retention_days = match self.config.retention_days {
-            Some(days) => days,
-            None => {
-                debug!("No retention policy configured, skipping");
-                return Ok(());
-            }
-        };
+        // Check if any retention policy is configured
+        if self.config.retention_days.is_none() && self.config.retention_apps.is_empty() {
+            debug!("No retention policy configured, skipping");
+            return Ok(());
+        }
 
-        let cutoff_time = Utc::now() - chrono::Duration::days(retention_days as i64);
-        info!(
-            "Enforcing retention policy: deleting data older than {} days (cutoff: {})",
-            retention_days, cutoff_time
-        );
+        info!("Enforcing retention policies (global + per-application)");
 
-        // Find SSTables that are entirely older than the cutoff
-        let sstables_to_delete: Vec<u64> = {
+        // Find SSTables that should be deleted based on retention policies
+        let sstables_to_delete: Vec<(u64, String)> = {
             let sstables = self.sstables.read().await;
-            sstables
-                .iter()
-                .filter(|sstable| {
-                    // Check if the SSTable's max timestamp is older than cutoff
-                    if let Some(max_time) = sstable.max_timestamp() {
-                        max_time < cutoff_time
-                    } else {
-                        false
+            let mut to_delete = Vec::new();
+
+            for sstable in sstables.iter() {
+                // Get the SSTable's max timestamp
+                let max_time = match sstable.max_timestamp() {
+                    Some(time) => time,
+                    None => {
+                        warn!("SSTable {} has no max timestamp, skipping retention check", sstable.id());
+                        continue;
                     }
-                })
-                .map(|sstable| sstable.id())
-                .collect()
+                };
+
+                // Get all application IDs in this SSTable
+                let app_ids = match sstable.application_ids() {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        warn!("Failed to get application IDs for SSTable {}: {}", sstable.id(), e);
+                        continue;
+                    }
+                };
+
+                // Determine the SHORTEST retention period for this SSTable
+                // We can only delete if ALL applications in the SSTable are past retention
+                let mut shortest_retention: Option<u32> = None;
+                let mut policy_source = String::new();
+
+                for app_id in &app_ids {
+                    // Check for per-application policy first
+                    let retention_days = if let Some(policy) = self.config.retention_apps.get(app_id) {
+                        match policy {
+                            Some(days) => {
+                                policy_source = format!("app:{}", app_id);
+                                Some(*days)
+                            },
+                            None => {
+                                // "never" - keep forever for this app
+                                shortest_retention = None;
+                                break;  // Can't delete if any app is "never"
+                            }
+                        }
+                    } else {
+                        // Fall back to global default
+                        policy_source = "global".to_string();
+                        self.config.retention_days
+                    };
+
+                    // Track the shortest retention period
+                    if let Some(days) = retention_days {
+                        shortest_retention = Some(match shortest_retention {
+                            Some(current) => current.max(days),  // Use longest to be safe
+                            None => days,
+                        });
+                    }
+                }
+
+                // Check if SSTable should be deleted based on shortest retention
+                if let Some(retention_days) = shortest_retention {
+                    let cutoff_time = Utc::now() - chrono::Duration::days(retention_days as i64);
+                    if max_time < cutoff_time {
+                        to_delete.push((sstable.id(), policy_source));
+                    }
+                }
+            }
+
+            to_delete
         };
 
         if sstables_to_delete.is_empty() {
@@ -428,7 +475,7 @@ impl StorageEngine {
         );
 
         // Delete the old SSTables
-        for sstable_id in sstables_to_delete {
+        for (sstable_id, policy_source) in sstables_to_delete {
             // Remove from in-memory list
             {
                 let mut sstables = self.sstables.write().await;
@@ -436,9 +483,9 @@ impl StorageEngine {
             }
 
             // Delete the file
-            let sstable_path = self.data_dir.join(format!("{}.sst", sstable_id));
+            let sstable_path = self.data_dir.join(format!("sstable-{:08}.sst", sstable_id));
             match tokio::fs::remove_file(&sstable_path).await {
-                Ok(_) => info!("Deleted SSTable {} (retention policy)", sstable_id),
+                Ok(_) => info!("Deleted SSTable {} (retention policy: {})", sstable_id, policy_source),
                 Err(e) => warn!("Failed to delete SSTable {}: {}", sstable_id, e),
             }
         }
@@ -508,6 +555,7 @@ mod tests {
     use super::*;
     use crate::model::frames::UplinkFrame;
     use crate::model::lorawan::*;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     fn create_test_config(data_dir: &std::path::Path) -> StorageConfig {
@@ -520,6 +568,7 @@ mod tests {
             enable_encryption: false,
             encryption_key: None,
             retention_days: None,
+            retention_apps: HashMap::new(),
             retention_check_interval_hours: 24,
         }
     }
