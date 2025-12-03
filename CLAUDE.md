@@ -334,6 +334,19 @@ See **README.md** section "API-Based Retention Management" for curl examples.
 - Uses `thiserror` for error derivation
 - All storage operations return `Result<T, LoraDbError>`
 
+### Versioning and Compatibility
+- **WAL Versioning**: WAL_VERSION = 2 (v2: Fixed bincode compatibility for serde_json::Value)
+  - Old WAL entries (v0/v1) are skipped during replay with warning
+  - Module: `src/engine/wal.rs`
+- **SSTable Versioning**: SSTABLE_VERSION = 2 (v2: Fixed bincode compatibility for Frame)
+  - Old SSTables (v1) are skipped during open with warning
+  - Incompatible SSTables preserved on disk but excluded from queries
+  - Module: `src/engine/sstable.rs`
+- **Format Change**: Version 2 introduced bincode compatibility fixes
+  - Removed `skip_serializing_if` attributes from UplinkFrame fields
+  - Custom serialization for DecodedPayload.object (JSON string wrapper)
+  - See commit 09b3a73 for details
+
 ### Configuration
 - Environment-based config using `dotenvy` crate
 - See `.env.example` for all configuration options
