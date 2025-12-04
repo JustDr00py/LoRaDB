@@ -19,3 +19,4 @@
 # Backup files
 *.bak
 *.tmp
+backups/
