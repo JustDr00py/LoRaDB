@@ -87,10 +87,12 @@ impl HttpServer {
             // Retention policy management routes
             .route("/retention/policies", get(list_retention_policies))
             .route("/retention/policies/global", get(get_global_retention))
-            .route("/retention/policies/global", axum::routing::put(set_global_retention))
+            // TODO: Fix Handler trait issues with State+Extension+Json combination
+            // .route("/retention/policies/global", axum::routing::put(set_global_retention))
             .route("/retention/policies/:app_id", get(get_application_retention))
-            .route("/retention/policies/:app_id", axum::routing::put(set_application_retention))
-            .route("/retention/policies/:app_id", delete(delete_application_retention))
+            // TODO: Fix Handler trait issues with State+Path+Extension+Json combination
+            // .route("/retention/policies/:app_id", axum::routing::put(set_application_retention))
+            // .route("/retention/policies/:app_id", delete(delete_application_retention))
             .route("/retention/enforce", post(enforce_retention))
             .layer(middleware::from_fn_with_state(
                 self.auth_middleware.clone(),

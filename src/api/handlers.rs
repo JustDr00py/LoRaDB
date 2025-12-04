@@ -538,8 +538,8 @@ pub async fn get_application_retention(
 /// Set application-specific retention policy
 pub async fn set_application_retention(
     State(state): State<AppState>,
-    Extension(auth_context): Extension<AuthContext>,
     Path(app_id): Path<String>,
+    Extension(auth_context): Extension<AuthContext>,
     Json(request): Json<SetApplicationRetentionRequest>,
 ) -> Result<StatusCode, LoraDbError> {
     // SECURITY: Validate app_id string length
@@ -566,8 +566,8 @@ pub async fn set_application_retention(
 /// Delete application-specific retention policy
 pub async fn delete_application_retention(
     State(state): State<AppState>,
-    Extension(auth_context): Extension<AuthContext>,
     Path(app_id): Path<String>,
+    Extension(auth_context): Extension<AuthContext>,
 ) -> Result<StatusCode, LoraDbError> {
     // SECURITY: Validate app_id string length
     validate_string_length(&app_id, MAX_APP_ID_LENGTH, "Application ID")?;

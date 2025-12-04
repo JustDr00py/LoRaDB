@@ -5,7 +5,8 @@ use crc32fast::Hasher;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tracing::{error, info, warn};
 
 const WAL_SEGMENT_SIZE: u64 = 64 * 1024 * 1024; // 64MB per segment
@@ -69,10 +70,7 @@ impl WriteAheadLog {
 
     /// Append a frame to the WAL
     pub fn append(&self, frame: &Frame) -> Result<()> {
-        let mut segment = self
-            .current_segment
-            .lock()
-            .map_err(|e| LoraDbError::WalError(format!("Lock poisoned: {}", e)))?;
+        let mut segment = self.current_segment.lock();
 
         // Serialize frame
         let payload =
@@ -109,10 +107,7 @@ impl WriteAheadLog {
 
     /// Sync the current segment to disk (fsync)
     pub fn sync(&self) -> Result<()> {
-        let mut segment = self
-            .current_segment
-            .lock()
-            .map_err(|e| LoraDbError::WalError(format!("Lock poisoned: {}", e)))?;
+        let mut segment = self.current_segment.lock();
 
         segment.file.flush()?;
         segment.file.get_mut().sync_all()?;
@@ -249,10 +244,7 @@ impl WriteAheadLog {
         let new_segment_path = Self::segment_path(&self.data_dir, 0);
         let new_segment = WalSegment::open(&new_segment_path)?;
 
-        let mut current = self
-            .current_segment
-            .lock()
-            .map_err(|e| LoraDbError::WalError(format!("Lock poisoned: {}", e)))?;
+        let mut current = self.current_segment.lock();
         *current = new_segment;
 
         Ok(())

@@ -11,7 +11,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
+use parking_lot::RwLock;
 use tracing::{debug, info, warn};
 
 pub mod retention_manager;
@@ -160,19 +161,19 @@ impl StorageEngine {
 
         // Append to WAL first (for durability)
         {
-            let wal = self.wal.read().await;
+            let wal = self.wal.read();
             wal.append(&frame)?;
         }
 
         // Insert into memtable
         {
-            let memtable = self.memtable.read().await;
+            let memtable = self.memtable.read();
             memtable.insert(frame).map_err(|e| LoraDbError::StorageError(e))?;
         }
 
         // Check if memtable should be flushed
         let should_flush = {
-            let memtable = self.memtable.read().await;
+            let memtable = self.memtable.read();
             memtable.should_flush(self.config.memtable_size_mb)
         };
 
@@ -190,7 +191,7 @@ impl StorageEngine {
 
         // Get next SSTable ID
         let sstable_id = {
-            let mut compaction = self.compaction_manager.write().await;
+            let mut compaction = self.compaction_manager.write();
             compaction.allocate_sstable_id()
         };
 
@@ -199,7 +200,7 @@ impl StorageEngine {
 
         // Copy all entries from memtable to SSTable
         let entries: Vec<_> = {
-            let memtable = self.memtable.read().await;
+            let memtable = self.memtable.read();
             memtable.iter().collect()
         };
 
@@ -218,26 +219,26 @@ impl StorageEngine {
         let reader = SSTableReader::open(sstable_path)?;
 
         {
-            let mut sstables = self.sstables.write().await;
+            let mut sstables = self.sstables.write();
             sstables.push(reader);
         }
 
         // Clear memtable
         {
-            let memtable = self.memtable.write().await;
+            let memtable = self.memtable.write();
             memtable.clear();
         }
 
         // Truncate WAL (frames are now in SSTable)
         {
-            let wal = self.wal.read().await;
+            let wal = self.wal.read();
             wal.truncate()?;
         }
 
         // Check if compaction should be triggered
         let should_compact = {
-            let sstables = self.sstables.read().await;
-            let compaction = self.compaction_manager.read().await;
+            let sstables = self.sstables.read();
+            let compaction = self.compaction_manager.read();
             compaction.should_compact(sstables.len())
         };
 
@@ -255,7 +256,7 @@ impl StorageEngine {
 
         // Collect SSTable paths (to reopen them in compaction)
         let sstable_paths: Vec<_> = {
-            let sstables = self.sstables.read().await;
+            let sstables = self.sstables.read();
             sstables.iter().map(|s| s.path().to_path_buf()).collect()
         };
 
@@ -268,7 +269,7 @@ impl StorageEngine {
 
         // Perform compaction
         let (new_metadata, old_paths) = {
-            let mut compaction = self.compaction_manager.write().await;
+            let mut compaction = self.compaction_manager.write();
             compaction.compact(old_sstables)?
         };
 
@@ -280,13 +281,13 @@ impl StorageEngine {
 
         // Replace SSTables list with just the new one
         {
-            let mut sstables = self.sstables.write().await;
+            let mut sstables = self.sstables.write();
             *sstables = vec![new_reader];
         }
 
         // Delete old SSTables
         {
-            let compaction = self.compaction_manager.read().await;
+            let compaction = self.compaction_manager.read();
             compaction.delete_old_sstables(old_paths)?;
         }
 
@@ -306,14 +307,14 @@ impl StorageEngine {
 
         // Query memtable
         {
-            let memtable = self.memtable.read().await;
+            let memtable = self.memtable.read();
             let memtable_results = memtable.scan_device_range(dev_eui, start_time, end_time);
             results.extend(memtable_results);
         }
 
         // Query SSTables
         {
-            let sstables = self.sstables.read().await;
+            let sstables = self.sstables.read();
             for sstable in sstables.iter() {
                 let sstable_results = sstable.scan(dev_eui, start_time, end_time)?;
                 results.extend(sstable_results);
@@ -385,7 +386,7 @@ impl StorageEngine {
 
                 // Check if memtable has data
                 let has_data = {
-                    let memtable = self.memtable.read().await;
+                    let memtable = self.memtable.read();
                     !memtable.is_empty()
                 };
 
@@ -419,7 +420,7 @@ impl StorageEngine {
 
         // Find SSTables that should be deleted based on retention policies
         let sstables_to_delete: Vec<(u64, String)> = {
-            let sstables = self.sstables.read().await;
+            let sstables = self.sstables.read();
             let mut to_delete = Vec::new();
 
             for sstable in sstables.iter() {
@@ -501,7 +502,7 @@ impl StorageEngine {
         for (sstable_id, policy_source) in sstables_to_delete {
             // Remove from in-memory list
             {
-                let mut sstables = self.sstables.write().await;
+                let mut sstables = self.sstables.write();
                 sstables.retain(|s| s.id() != sstable_id);
             }
 
@@ -551,7 +552,7 @@ impl StorageEngine {
 
         // 1. Delete from memtable
         {
-            let memtable = self.memtable.read().await;
+            let memtable = self.memtable.read();
             let deleted = memtable.delete_device(dev_eui);
             info!("Deleted {} frames from memtable", deleted);
             total_deleted += deleted;
@@ -559,7 +560,7 @@ impl StorageEngine {
 
         // 2. Rewrite SSTables without this device's data
         let sstables_to_process = {
-            let sstables = self.sstables.read().await;
+            let sstables = self.sstables.read();
             sstables.iter().map(|s| s.path().to_path_buf()).collect::<Vec<_>>()
         };
 
@@ -597,7 +598,7 @@ impl StorageEngine {
                 // Only create new SSTable if there are remaining frames
                 if !frames.is_empty() {
                     let new_id = {
-                        let mut compaction = self.compaction_manager.write().await;
+                        let mut compaction = self.compaction_manager.write();
                         compaction.allocate_sstable_id()
                     };
 
@@ -635,7 +636,7 @@ impl StorageEngine {
 
             // Replace SSTables list with new ones
             {
-                let mut sstables = self.sstables.write().await;
+                let mut sstables = self.sstables.write();
                 *sstables = new_sstables;
             }
 
@@ -667,7 +668,7 @@ impl StorageEngine {
 
         // Check if memtable has any data to flush
         let has_data = {
-            let memtable = self.memtable.read().await;
+            let memtable = self.memtable.read();
             !memtable.is_empty()
         };
 
@@ -678,7 +679,7 @@ impl StorageEngine {
 
         // Sync WAL to ensure all data is written
         {
-            let wal = self.wal.read().await;
+            let wal = self.wal.read();
             wal.sync()?;
         }
 
