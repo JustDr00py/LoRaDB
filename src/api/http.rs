@@ -1,8 +1,7 @@
 use crate::api::handlers::{
-    create_token, delete_application_retention, delete_device, enforce_retention, execute_query,
+    create_token, delete_device, enforce_retention, execute_query,
     get_application_retention, get_device, get_global_retention, health_check, list_devices,
-    list_retention_policies, list_tokens, revoke_token, set_application_retention,
-    set_global_retention, AppState,
+    list_retention_policies, list_tokens, revoke_token, AppState,
 };
 use crate::api::middleware::{jwt_auth, security_headers, AuthMiddleware};
 use crate::config::ApiConfig;
@@ -31,6 +30,7 @@ pub struct HttpServer {
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
     cors_allowed_origins: Vec<String>,
+    #[allow(dead_code)]
     rate_limit_per_minute: u32,
 }
 

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tracing::{error, info, warn};
 
+#[allow(dead_code)]
 const WAL_SEGMENT_SIZE: u64 = 64 * 1024 * 1024; // 64MB per segment
 const WAL_MAGIC: u32 = 0x4C4F5241; // "LORA"
 const WAL_VERSION: u16 = 2; // v2: Fixed bincode compatibility for serde_json::Value
@@ -18,12 +19,14 @@ pub struct WriteAheadLog {
     data_dir: PathBuf,
     current_segment: Arc<Mutex<WalSegment>>,
     segment_number: u64,
+    #[allow(dead_code)]
     sync_interval_ms: u64,
 }
 
 struct WalSegment {
     file: BufWriter<File>,
     size: u64,
+    #[allow(dead_code)]
     path: PathBuf,
 }
 
@@ -33,6 +36,7 @@ struct WalSegment {
 /// - Payload (N bytes): bincode-serialized Frame
 /// - CRC32 (4 bytes): checksum of length + payload
 #[derive(Debug)]
+#[allow(dead_code)]
 struct WalEntry {
     _frame: Frame,
 }
