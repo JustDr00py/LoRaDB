@@ -146,6 +146,15 @@ The query system supports nested field projection using dot notation, making it 
 ### Basic Query Syntax
 
 ```sql
+SELECT { * | uplink | downlink | join | field1, field2, ... }
+FROM device 'DevEUI'
+[ WHERE { BETWEEN 'start' AND 'end' | SINCE 'timestamp' | LAST 'duration' } ]
+[ LIMIT integer ]
+```
+
+**Examples:**
+
+```sql
 -- Query all uplink frames
 SELECT uplink FROM device '0123456789ABCDEF' WHERE LAST '1h'
 
@@ -157,7 +166,31 @@ SELECT received_at, f_port, f_cnt, decoded_payload.object.temperature FROM devic
 
 -- Query deeply nested fields
 SELECT decoded_payload.object.sensor.voltage, decoded_payload.object.sensor.status FROM device '0123456789ABCDEF'
+
+-- Limit results to 100 frames
+SELECT * FROM device '0123456789ABCDEF' WHERE LAST '24h' LIMIT 100
+
+-- Get only the last 10 uplink frames
+SELECT uplink FROM device '0123456789ABCDEF' WHERE LAST '1h' LIMIT 10
 ```
+
+### LIMIT Clause
+
+The optional LIMIT clause restricts the number of results returned:
+
+```sql
+-- Get last 10 uplink frames
+SELECT uplink FROM device '0123456789ABCDEF' WHERE LAST '1h' LIMIT 10
+
+-- Get first 100 frames from today
+SELECT * FROM device 'DEV_EUI' WHERE SINCE '2025-12-12T00:00:00Z' LIMIT 100
+```
+
+**Important:**
+- LIMIT must be a positive integer (> 0)
+- LIMIT values exceeding 10,000 are capped at MAX_QUERY_RESULTS (10,000) for security
+- LIMIT is optional; queries without LIMIT default to MAX_QUERY_RESULTS (10,000)
+- LIMIT clause must come after WHERE clause
 
 ### Field Path Structure
 
