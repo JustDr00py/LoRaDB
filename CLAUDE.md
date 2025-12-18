@@ -107,6 +107,15 @@ cargo run
 - `ttn.rs`: The Things Network v3 message parsing
 - All parsers convert to unified `Frame` enum
 
+**HTTP Ingestion** (`src/api/handlers.rs::ingest_chirpstack`):
+- Alternative to MQTT for environments without broker access (e.g., Helium, managed ChirpStack)
+- Accepts ChirpStack webhook events via `POST /ingest?event={type}`
+- Supports event types: `up` (uplink), `join` (device join), `status` (battery/margin)
+- Requires JWT or API token authentication
+- Writes directly to storage (no mpsc channel buffering)
+- Reuses ChirpStack parser methods: `parse_uplink()`, `parse_join()`, `parse_status()`
+- See `docs/HTTP_INGESTION.md` for detailed configuration guide
+
 **Query System** (`src/query/`):
 - `parser.rs`: Hand-written recursive descent parser for query DSL
 - `dsl.rs`: AST representation (SELECT, FROM, WHERE, time ranges)
@@ -120,11 +129,12 @@ cargo run
 - `http.rs`: Axum HTTP server with optional TLS (use reverse proxy in production)
 - `handlers.rs`: REST endpoints
   - `/health` - Health check
+  - `/ingest?event={type}` - ChirpStack webhook ingestion (uplink, join, status events)
   - `/query` - Query DSL execution
   - `/devices`, `/devices/:dev_eui` - Device management
   - `/tokens` - API token management
-  - `/retention/policies` - Retention policy management (NEW)
-  - `/retention/enforce` - Immediate enforcement trigger (NEW)
+  - `/retention/policies` - Retention policy management
+  - `/retention/enforce` - Immediate enforcement trigger
 - `middleware.rs`: Dual authentication (JWT + API tokens), security headers, CORS
 
 **Security** (`src/security/`):
@@ -146,7 +156,7 @@ The query system supports nested field projection using dot notation, making it 
 ### Basic Query Syntax
 
 ```sql
-SELECT { * | uplink | downlink | join | field1, field2, ... }
+SELECT { * | uplink | downlink | join | status | field1, field2, ... }
 FROM device 'DevEUI'
 [ WHERE { BETWEEN 'start' AND 'end' | SINCE 'timestamp' | LAST 'duration' } ]
 [ LIMIT integer ]
@@ -157,6 +167,12 @@ FROM device 'DevEUI'
 ```sql
 -- Query all uplink frames
 SELECT uplink FROM device '0123456789ABCDEF' WHERE LAST '1h'
+
+-- Query status frames (battery, margin)
+SELECT status FROM device '0123456789ABCDEF' WHERE LAST '7d'
+
+-- Query specific status fields
+SELECT margin, battery_level FROM device '0123456789ABCDEF' WHERE LAST '24h'
 
 -- Query specific measurements using dot notation
 SELECT decoded_payload.object.co2, decoded_payload.object.TempC_SHT FROM device '0123456789ABCDEF' WHERE LAST '24h'
