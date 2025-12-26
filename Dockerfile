@@ -40,10 +40,11 @@ RUN mkdir -p /var/lib/loradb/data && \
 # Copy binaries from builder
 COPY --from=builder /build/target/release/loradb /usr/local/bin/loradb
 COPY --from=builder /build/target/release/generate-token /usr/local/bin/generate-token
+COPY --from=builder /build/target/release/generate-api-token /usr/local/bin/generate-api-token
 
 # Set ownership
-RUN chown root:root /usr/local/bin/loradb /usr/local/bin/generate-token && \
-    chmod 0755 /usr/local/bin/loradb /usr/local/bin/generate-token
+RUN chown root:root /usr/local/bin/loradb /usr/local/bin/generate-token /usr/local/bin/generate-api-token && \
+    chmod 0755 /usr/local/bin/loradb /usr/local/bin/generate-token /usr/local/bin/generate-api-token
 
 # Switch to non-root user
 USER loradb
