@@ -26,36 +26,41 @@ API tokens are ideal for:
 
 ## Creating API Tokens
 
-### Method 1: Using the CLI (Recommended for initial setup)
+**Important:** Choose the right method based on whether your server is running:
+
+- **Server is running** → Use Method 1 (API) - Instant, no restart needed
+- **Initial setup / Server stopped** → Use Method 2 (CLI) - Simple offline generation
+
+### Method 1: Using the API (Recommended for running servers)
+
+**✅ Pros:** Token available immediately, no server restart required
+**❌ Cons:** Requires a valid JWT token first
+
+This method adds the token to the running server's memory instantly.
 
 ```bash
-# Generate an API token that never expires
-./target/release/generate-api-token /var/lib/loradb/data admin "Production Dashboard"
+# Step 1: Generate a JWT token for authentication (expires in 1 hour)
+JWT_TOKEN=$(./target/release/generate-token admin | grep "^eyJ" | tr -d '\n')
 
-# Generate an API token that expires in 365 days
-./target/release/generate-api-token /var/lib/loradb/data admin "Dev Environment" 365
-```
+# Docker:
+JWT_TOKEN=$(docker compose exec loradb generate-token admin | grep "^eyJ" | tr -d '\n')
 
-**Docker:**
-```bash
-docker compose exec loradb generate-api-token /var/lib/loradb/data admin "Production Dashboard"
-```
-
-### Method 2: Using the API (Recommended for self-service)
-
-First, authenticate with a JWT token:
-
-```bash
-# Generate a JWT token for authentication
-JWT_TOKEN=$(./target/release/generate-token admin)
-
-# Create an API token via the API
+# Step 2: Create an API token via the API
 curl -X POST https://your-domain.com/tokens \
   -H "Authorization: Bearer $JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Production Dashboard",
     "expires_in_days": 365
+  }'
+
+# For a token that never expires, use null:
+curl -X POST https://your-domain.com/tokens \
+  -H "Authorization: Bearer $JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Production Dashboard",
+    "expires_in_days": null
   }'
 ```
 
@@ -71,6 +76,32 @@ Response:
 ```
 
 **⚠️ Important:** Save the `token` value immediately. It won't be shown again!
+
+### Method 2: Using the CLI (Requires server restart if running)
+
+**✅ Pros:** Simple, works offline, no JWT token needed
+**❌ Cons:** Requires server restart to load the token if server is already running
+
+```bash
+# Generate an API token that never expires
+./target/release/generate-api-token /var/lib/loradb/data admin "Production Dashboard"
+
+# Generate an API token that expires in 365 days
+./target/release/generate-api-token /var/lib/loradb/data admin "Dev Environment" 365
+```
+
+**Docker:**
+```bash
+# Generate the token
+docker compose exec loradb generate-api-token /var/lib/loradb/data admin "Production Dashboard"
+
+# IMPORTANT: Restart the server to load the new token
+docker compose restart loradb
+```
+
+**Why restart?** The server loads tokens from disk only once at startup. CLI-generated tokens are written to disk but not loaded into the running server's memory. A simple restart (not rebuild) takes just a few seconds and loads all tokens from disk.
+
+**Note:** No restart needed if you're generating tokens before starting the server for the first time.
 
 ## Using API Tokens
 
@@ -251,10 +282,31 @@ graph LR
 
 | Error | Status | Cause | Solution |
 |-------|--------|-------|----------|
-| Token validation failed | 401 | Invalid token | Check token is correct and not revoked |
+| Token validation failed: Invalid token | 401 | Token not found in server memory | Created via CLI? Restart the server. Otherwise, verify token is correct |
 | Token has expired | 401 | Token past expiration date | Create a new token |
 | Token has been revoked | 401 | Token manually revoked | Create a new token |
 | Unauthorized | 401 | Missing Authorization header | Add header: `Authorization: Bearer <token>` |
+
+### CLI Token Not Working After Creation
+
+If you generated a token using the CLI tool but it returns "Invalid token":
+
+1. **Check if server is running:**
+   ```bash
+   docker compose ps
+   ```
+
+2. **Restart the server to load the token:**
+   ```bash
+   docker compose restart loradb
+   ```
+
+3. **Verify token was written to disk:**
+   ```bash
+   docker compose exec loradb cat /var/lib/loradb/data/api_tokens.json
+   ```
+
+4. **Alternative:** Use the API method instead (no restart needed)
 
 ## Migration from JWT to API Tokens
 

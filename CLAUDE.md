@@ -272,17 +272,20 @@ LoRaDB supports two authentication methods:
 ### API Tokens (Long-lived)
 - **Use case**: Dashboards, automation, services, long-running applications
 - **Expiration**: Optional (configurable per-token or never expires)
-- **Generation**: `cargo run --bin generate-api-token <data_dir> <username> [name] [days]`
+- **Generation**: Two methods available
+  - **API (recommended for running servers)**: `POST /tokens` - instant, no restart needed
+  - **CLI (requires restart if server running)**: `cargo run --bin generate-api-token <data_dir> <username> [name] [days]`
 - **Format**: `ldb_` prefix + 32 alphanumeric characters
 - **Pros**: Revocable, named, tracked (last used), multiple per user
 - **Cons**: Requires storage (JSON file in data directory)
 
 ### API Token Management
-- **Create**: `POST /tokens` with `{"name": "Token Name", "expires_in_days": 365}`
+- **Create**: `POST /tokens` with `{"name": "Token Name", "expires_in_days": 365}` or `null` for no expiration
 - **List**: `GET /tokens` (returns all tokens for authenticated user)
 - **Revoke**: `DELETE /tokens/:token_id`
 - **Storage**: `<data_dir>/api_tokens.json` (SHA256 hashed tokens)
 - **Module**: `src/security/api_token.rs`
+- **Important**: CLI-generated tokens require server restart to be loaded into memory. Use API method to avoid restart.
 
 ### Authentication Middleware
 - **Module**: `src/api/middleware.rs`
