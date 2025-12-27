@@ -88,27 +88,30 @@ cargo run
 - **Retention Manager** (`storage/retention_manager.rs`): Dynamic retention policy management with JSON persistence
 
 **Data Flow**:
-1. MQTT message arrives → parsed into `Frame`
-2. Frame sent via `mpsc::channel` to storage engine
-3. Storage writes to WAL (durability), then memtable (speed)
-4. Memtable flushed to SSTable when:
+1. Data arrives via **MQTT** or **HTTP ingestion**:
+   - **MQTT**: Message parsed into `Frame` → sent via `mpsc::channel` to storage engine
+   - **HTTP**: Webhook parsed into `Frame` → written directly to storage (no channel)
+2. Storage writes to WAL (durability), then memtable (speed)
+3. Memtable flushed to SSTable when:
    - Periodic flush timer triggers (default: 5 minutes, configurable via `LORADB_STORAGE_MEMTABLE_FLUSH_INTERVAL_SECS`)
    - Memtable reaches size threshold (default: 64MB, configurable via `LORADB_STORAGE_MEMTABLE_SIZE_MB`)
    - Graceful shutdown (SIGTERM/SIGINT)
-5. Multiple SSTables trigger compaction to merge and deduplicate
+4. Multiple SSTables trigger compaction to merge and deduplicate
 
 **Device-First Indexing**: Composite key format `(DevEUI, timestamp, sequence)` enables efficient per-device queries.
 
 ### Key Modules
 
-**MQTT Ingestion** (`src/ingest/`):
+**MQTT Ingestion** (`src/ingest/`) - **OPTIONAL**:
 - `mqtt.rs`: TLS connection management and automatic reconnection
 - `chirpstack.rs`: ChirpStack v4 JSON message parsing
 - `ttn.rs`: The Things Network v3 message parsing
 - All parsers convert to unified `Frame` enum
+- Can be disabled entirely - HTTP ingestion can be used instead
 
 **HTTP Ingestion** (`src/api/handlers.rs::ingest_chirpstack`):
 - Alternative to MQTT for environments without broker access (e.g., Helium, managed ChirpStack)
+- Recommended for managed LoRaWAN services without direct MQTT access
 - Accepts ChirpStack webhook events via `POST /ingest?event={type}`
 - Supports event types: `up` (uplink), `join` (device join), `status` (battery/margin)
 - Requires JWT or API token authentication

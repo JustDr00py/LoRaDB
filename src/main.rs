@@ -52,15 +52,6 @@ async fn main() -> Result<()> {
         config.api.clone(),
     );
 
-    // Create channel for MQTT -> Storage communication
-    let (frame_tx, frame_rx) = mpsc::channel(1000);
-
-    // Start frame processor in background
-    let storage_clone = storage.clone();
-    let processor_handle = tokio::spawn(async move {
-        storage_clone.start_frame_processor(frame_rx).await;
-    });
-
     // Start periodic memtable flush (every 5 minutes)
     info!("Starting periodic memtable flush task");
     let flush_handle = storage.clone().start_periodic_flush();
@@ -69,9 +60,18 @@ async fn main() -> Result<()> {
     info!("Starting retention policy enforcement task");
     let retention_handle = storage.clone().start_retention_enforcement();
 
-    // Initialize MQTT ingestion
-    let mqtt_handle = if config.mqtt.chirpstack_broker.is_some() || config.mqtt.ttn_broker.is_some() {
+    // Initialize MQTT ingestion (optional)
+    let (mqtt_handle, processor_handle) = if config.mqtt.chirpstack_broker.is_some() || config.mqtt.ttn_broker.is_some() {
         info!("Initializing MQTT ingestion");
+
+        // Create channel for MQTT -> Storage communication
+        let (frame_tx, frame_rx) = mpsc::channel(1000);
+
+        // Start frame processor in background
+        let storage_clone = storage.clone();
+        let processor_handle = tokio::spawn(async move {
+            storage_clone.start_frame_processor(frame_rx).await;
+        });
 
         let chirpstack_broker = config.mqtt.chirpstack_broker.clone().map(|url| BrokerConfig {
             broker_url: url,
@@ -90,14 +90,16 @@ async fn main() -> Result<()> {
             frame_tx,
         );
 
-        Some(tokio::spawn(async move {
+        let mqtt_handle = tokio::spawn(async move {
             if let Err(e) = mqtt_ingestor.start().await {
                 error!("MQTT ingestion error: {}", e);
             }
-        }))
+        });
+
+        (Some(mqtt_handle), Some(processor_handle))
     } else {
-        info!("MQTT ingestion disabled (no brokers configured)");
-        None
+        info!("MQTT ingestion disabled - using HTTP ingestion only");
+        (None, None)
     };
 
     info!("LoRaDB started successfully");
@@ -153,8 +155,10 @@ async fn main() -> Result<()> {
         error!("Error during storage shutdown: {}", e);
     }
 
-    // Stop frame processor last
-    processor_handle.abort();
+    // Stop frame processor last (if MQTT was enabled)
+    if let Some(handle) = processor_handle {
+        handle.abort();
+    }
 
     info!("LoRaDB shutdown complete");
 
