@@ -125,6 +125,63 @@ Use the helper script for common operations:
 
 ---
 
+### Option 0: Pre-built Docker Images (Fastest - No Building Required)
+
+**Recommended for low-powered devices (Raspberry Pi, etc.)**
+
+Pre-built Docker images are automatically published to GitHub Container Registry. This completely avoids building on your device.
+
+#### Quick Start with Pre-built Images
+
+1. **Clone the repository**
+```bash
+git clone https://github.com/yourusername/loradb
+cd loradb
+```
+
+2. **Create environment configuration**
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+3. **Use the pre-built image**
+```bash
+# Option A: Use the pre-built compose file
+docker-compose -f docker-compose.prebuilt.yml up -d
+
+# Option B: Pull and run manually
+docker pull ghcr.io/yourusername/loradb:latest
+docker run -d --name loradb \
+  --env-file .env \
+  -p 8443:8443 \
+  -v loradb-data:/var/lib/loradb/data \
+  ghcr.io/yourusername/loradb:latest
+```
+
+4. **Update to latest version**
+```bash
+docker-compose -f docker-compose.prebuilt.yml pull
+docker-compose -f docker-compose.prebuilt.yml up -d
+```
+
+#### Available Image Tags
+
+- `latest` - Latest commit on main branch
+- `v0.1.0` - Specific version tags
+- `0.1` - Major.minor version
+- `sha-abc123` - Specific commit SHA
+
+#### Multi-Architecture Support
+
+Pre-built images support both:
+- `linux/amd64` - x86_64 systems (standard servers/desktops)
+- `linux/arm64` - ARM64 systems (Raspberry Pi 3/4/5, AWS Graviton)
+
+Docker automatically pulls the correct architecture for your device.
+
+---
+
 ### Option 1: Docker Deployment (Manual Setup)
 
 #### Prerequisites
