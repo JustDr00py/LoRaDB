@@ -79,9 +79,10 @@ impl StorageEngine {
         info!("Rebuilding device registry from stored data...");
         let mut device_count = 0;
 
-        // Register devices from SSTables
+        // Register devices from SSTables - read only one frame per unique DevEUI
+        // to avoid loading all frames into memory (OOM with many SSTables)
         for sstable in &sstables {
-            if let Ok(frames) = sstable.iter_all() {
+            if let Ok(frames) = sstable.iter_unique_device_frames() {
                 for frame in frames {
                     device_registry.register_or_update(
                         frame.dev_eui().clone(),

@@ -397,6 +397,27 @@ impl SSTableReader {
         Ok(results)
     }
 
+    /// Get one frame per unique device in this SSTable.
+    /// Far more efficient than iter_all() for device registry rebuilding,
+    /// since we only need one frame per DevEUI to register a device.
+    /// The index is sorted by (dev_eui, timestamp, sequence), so unique
+    /// devices are discovered by checking for DevEUI changes in order.
+    pub fn iter_unique_device_frames(&self) -> Result<Vec<Frame>> {
+        let mut results = Vec::new();
+        let mut last_dev_eui: Option<&str> = None;
+
+        for entry in &self.index {
+            let dev_eui = entry.key.dev_eui.as_str();
+            if last_dev_eui != Some(dev_eui) {
+                last_dev_eui = Some(dev_eui);
+                let frame = self.read_frame(entry)?;
+                results.push(frame);
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Scan for entries matching a device and time range
     pub fn scan(
         &self,
