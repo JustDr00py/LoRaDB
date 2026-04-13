@@ -2,7 +2,7 @@
 
 **A secure, high-performance time-series database for LoRaWAN device data**
 
-LoRaDB is a specialized database built from scratch in Rust for storing and querying LoRaWAN network traffic. It features an LSM-tree storage engine, MQTT ingestion from ChirpStack and The Things Network, end-to-end encryption, and a simple query DSL.
+LoRaDB is a specialized database built from scratch in Rust for storing and querying LoRaWAN network traffic. It features an LSM-tree storage engine, flexible ingestion (MQTT or HTTP), end-to-end encryption, and a simple query DSL.
 
 ## Features
 
@@ -16,14 +16,15 @@ LoRaDB is a specialized database built from scratch in Rust for storing and quer
 - **AES-256-GCM Encryption**: Optional data-at-rest encryption with key zeroization
 - **Flexible Retention Policies**: Global default + per-application retention with automatic enforcement
 
-### MQTT Ingestion
+### MQTT Ingestion (Optional)
 - **Dual Network Support**: ChirpStack v4 and The Things Network v3
 - **TLS 1.2+**: Secure connections with system certificates
 - **Automatic Reconnection**: Resilient connection handling
 - **Message Parsing**: JSON deserialization with validation
 
-### HTTP Ingestion
+### HTTP Ingestion (Optional)
 - **ChirpStack Webhook Support**: Ingest data via HTTP webhooks when MQTT access is unavailable
+- **Can be used instead of or alongside MQTT ingestion**
 - **Supported Events**: Uplink, Join, and Status events
 - **Authenticated**: JWT or API token required for all requests
 - **Same Data Model**: HTTP-ingested data is queryable using the same DSL as MQTT data
@@ -124,6 +125,63 @@ Use the helper script for common operations:
 
 ---
 
+### Option 0: Pre-built Docker Images (Fastest - No Building Required)
+
+**Recommended for low-powered devices (Raspberry Pi, etc.)**
+
+Pre-built Docker images are automatically published to GitHub Container Registry. This completely avoids building on your device.
+
+#### Quick Start with Pre-built Images
+
+1. **Clone the repository**
+```bash
+git clone https://github.com/yourusername/loradb
+cd loradb
+```
+
+2. **Create environment configuration**
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+3. **Use the pre-built image**
+```bash
+# Option A: Use the pre-built compose file
+docker-compose -f docker-compose.prebuilt.yml up -d
+
+# Option B: Pull and run manually
+docker pull ghcr.io/yourusername/loradb:latest
+docker run -d --name loradb \
+  --env-file .env \
+  -p 8443:8443 \
+  -v loradb-data:/var/lib/loradb/data \
+  ghcr.io/yourusername/loradb:latest
+```
+
+4. **Update to latest version**
+```bash
+docker-compose -f docker-compose.prebuilt.yml pull
+docker-compose -f docker-compose.prebuilt.yml up -d
+```
+
+#### Available Image Tags
+
+- `latest` - Latest commit on main branch
+- `v0.1.0` - Specific version tags
+- `0.1` - Major.minor version
+- `sha-abc123` - Specific commit SHA
+
+#### Multi-Architecture Support
+
+Pre-built images support both:
+- `linux/amd64` - x86_64 systems (standard servers/desktops)
+- `linux/arm64` - ARM64 systems (Raspberry Pi 3/4/5, AWS Graviton)
+
+Docker automatically pulls the correct architecture for your device.
+
+---
+
 ### Option 1: Docker Deployment (Manual Setup)
 
 #### Prerequisites
@@ -149,7 +207,7 @@ cp .env.example .env
 # Required: Generate a secure JWT secret
 LORADB_API_JWT_SECRET=$(openssl rand -base64 32)
 
-# Required: Configure MQTT broker (ChirpStack or TTN)
+# Optional: Configure MQTT broker (ChirpStack or TTN) - or use HTTP ingestion instead
 LORADB_MQTT_CHIRPSTACK_BROKER=mqtts://chirpstack.example.com:8883
 LORADB_MQTT_USERNAME=loradb
 LORADB_MQTT_PASSWORD=your-password

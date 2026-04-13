@@ -207,15 +207,8 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        // Ensure at least one MQTT broker is configured
-        if self.mqtt.chirpstack_broker.is_none()
-            && self.mqtt.ttn_broker.is_none()
-        {
-            return Err(LoraDbError::ConfigError(
-                "At least one MQTT broker must be configured".to_string(),
-            )
-            .into());
-        }
+        // MQTT ingestion is now optional - HTTP ingestion can be used instead
+        // No validation required for MQTT brokers (both can be None)
 
         // Validate TLS certificate paths exist if TLS is enabled
         if self.api.enable_tls {
