@@ -69,9 +69,12 @@ impl Memtable {
 
         let key = MemtableKey::new(dev_eui, timestamp, sequence);
 
-        // Estimate size (rough approximation)
-        // Frame serialized size + key overhead
-        let frame_size = std::mem::size_of_val(&frame) + std::mem::size_of_val(&key);
+        // Use serialized size for an accurate heap-aware estimate.
+        // std::mem::size_of_val only measures stack footprint and misses
+        // heap-allocated String/Vec data inside Frame, which caused OOM crashes.
+        let frame_size = bincode::serialized_size(&frame).unwrap_or(256) as usize
+            + key.dev_eui.len()
+            + std::mem::size_of::<MemtableKey>();
 
         self.data.insert(key, frame);
         self.size_bytes.fetch_add(frame_size, Ordering::Relaxed);
@@ -183,14 +186,16 @@ impl Memtable {
         for key in keys_to_delete {
             if let Some(entry) = self.data.remove(&key) {
                 deleted_count += 1;
-                // Approximate size calculation
-                let frame_size = std::mem::size_of_val(&entry.value()) + std::mem::size_of_val(&key);
+                let frame_size = bincode::serialized_size(entry.value()).unwrap_or(256) as usize
+                    + key.dev_eui.len()
+                    + std::mem::size_of::<MemtableKey>();
                 deleted_bytes += frame_size;
             }
         }
 
-        // Update size counter
-        self.size_bytes.fetch_sub(deleted_bytes, Ordering::Relaxed);
+        // Update size counter, clamping to 0 to prevent underflow
+        let current = self.size_bytes.load(Ordering::Relaxed);
+        self.size_bytes.store(current.saturating_sub(deleted_bytes), Ordering::Relaxed);
 
         deleted_count
     }
