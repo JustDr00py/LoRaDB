@@ -61,42 +61,27 @@ impl CompactionManager {
 
         info!("Starting compaction of {} SSTables", sstables.len());
 
-        // Use a BTreeMap to merge and deduplicate entries
-        // Key: MemtableKey (sorted), Value: Frame
-        // Later entries with same dev_eui/timestamp but higher sequence number override earlier ones
+        // Use a BTreeMap to merge and deduplicate entries.
+        // Inserting directly (rather than collecting into a Vec first) halves peak
+        // memory by avoiding a second copy of all frame data during the merge phase.
         let mut merged_data: BTreeMap<MemtableKey, Frame> = BTreeMap::new();
 
-        // Collect all entries from all SSTables using iter_all()
-        let mut all_entries: Vec<(MemtableKey, Frame)> = Vec::new();
-
         for reader in &sstables {
-            // Extract all frames from this SSTable
-            let frames = reader.iter_all()?;
-
-            // Add frames with their keys
-            for frame in frames {
+            for frame in reader.iter_all()? {
                 let key = MemtableKey::new(
                     frame.dev_eui(),
                     frame.timestamp(),
-                    0, // Sequence number not preserved during compaction (will be deduplicated by dev_eui+timestamp)
+                    0, // Sequence not preserved; deduplication is by dev_eui+timestamp
                 );
-                all_entries.push((key, frame));
+                merged_data.insert(key, frame);
             }
-        }
-
-        // Sort and deduplicate
-        all_entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Merge into BTreeMap (automatically deduplicates by key, keeping last value)
-        for (key, frame) in all_entries {
-            merged_data.insert(key, frame);
         }
 
         info!("Merged {} entries after deduplication", merged_data.len());
 
         // Write new SSTable
         let new_id = self.allocate_sstable_id();
-        let mut writer = SSTableWriter::new(new_id, &self.data_dir);
+        let mut writer = SSTableWriter::new(new_id, &self.data_dir)?;
 
         for (key, frame) in merged_data {
             writer.add(key, frame)?;
@@ -249,7 +234,7 @@ mod tests {
         let now = Utc::now();
 
         for i in 0..3 {
-            let mut writer = SSTableWriter::new(i, temp_dir.path());
+            let mut writer = SSTableWriter::new(i, temp_dir.path()).unwrap();
             let key = MemtableKey::new(&dev_eui, now, i);
             writer.add(key, create_test_frame("0123456789ABCDEF", now)).unwrap();
             writer.finish().unwrap();

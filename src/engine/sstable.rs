@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use crc32fast::Hasher;
 use lz4::{Decoder, EncoderBuilder};
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -46,65 +47,40 @@ struct IndexEntry {
 /// - Footer (created_at, index_offset, min/max keys)
 pub struct SSTableWriter {
     id: u64,
-    output_path: PathBuf,
-    entries: Vec<(MemtableKey, Frame)>,
+    writer: BufWriter<File>,
+    bloom_header_size: u64,
+    index_entries: Vec<IndexEntry>,
     bloom_filter: BloomFilter,
     application_ids: HashSet<String>,
+    min_key: Option<MemtableKey>,
+    max_key: Option<MemtableKey>,
+    num_entries: u64,
+    data_size_bytes: u64,
 }
 
 impl SSTableWriter {
-    pub fn new(id: u64, output_dir: &Path) -> Self {
+    /// Create a new SSTableWriter. Opens the file immediately and writes a placeholder
+    /// header; the real header is written by finish() after all entries are known.
+    pub fn new(id: u64, output_dir: &Path) -> Result<Self> {
         let output_path = output_dir.join(format!("sstable-{:08}.sst", id));
 
-        // Create bloom filter for expected entries (estimate 10k entries, 1% FP rate)
         let bloom_filter = BloomFilter::new(10_000, 0.01);
 
-        Self {
-            id,
-            output_path,
-            entries: Vec::new(),
-            bloom_filter,
-            application_ids: HashSet::new(),
-        }
-    }
+        // Serialize a fresh bloom filter to determine the fixed placeholder size.
+        // BloomFilter uses a fixed-size bit array (capacity + FP rate are constants),
+        // so its serialized size is the same whether 0 or N elements are inserted.
+        let placeholder_bloom = bincode::serialize(&bloom_filter)?;
+        let bloom_header_size = placeholder_bloom.len() as u64;
 
-    /// Add an entry to the SSTable (must be added in sorted order)
-    pub fn add(&mut self, key: MemtableKey, frame: Frame) -> Result<()> {
-        // Verify sorted order
-        if let Some((last_key, _)) = self.entries.last() {
-            if &key <= last_key {
-                return Err(LoraDbError::StorageError(
-                    "SSTable entries must be added in sorted order".into(),
-                )
-                .into());
-            }
-        }
-
-        // Add to bloom filter
-        self.bloom_filter.insert(&key.dev_eui);
-
-        // Track application ID for retention policy
-        if let Some(app_id) = frame.application_id() {
-            self.application_ids.insert(app_id.as_str().to_string());
-        }
-
-        self.entries.push((key, frame));
-        Ok(())
-    }
-
-    /// Finalize and write SSTable to disk
-    pub fn finish(self) -> Result<SSTableMetadata> {
-        if self.entries.is_empty() {
-            return Err(LoraDbError::StorageError("Cannot write empty SSTable".into()).into());
-        }
+        // Header layout: magic(4) + version(2) + id(8) + num_entries(8) + bloom_size(4) + bloom_data(N)
+        let header_total = 4 + 2 + 8 + 8 + 4 + bloom_header_size as usize;
 
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&self.output_path)?;
+            .open(&output_path)?;
 
-        // Set strict permissions (0600)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -113,123 +89,163 @@ impl SSTableWriter {
 
         let mut writer = BufWriter::new(file);
 
-        // Prepare metadata
-        let min_key = self.entries.first().unwrap().0.clone();
-        let max_key = self.entries.last().unwrap().0.clone();
-        let num_entries = self.entries.len() as u64;
+        // Reserve space for the header; finish() seeks back and overwrites these zeros.
+        writer.write_all(&vec![0u8; header_total])?;
 
-        // Write header
-        writer.write_all(&SSTABLE_MAGIC.to_le_bytes())?;
-        writer.write_all(&SSTABLE_VERSION.to_le_bytes())?;
-        writer.write_all(&self.id.to_le_bytes())?;
-        writer.write_all(&num_entries.to_le_bytes())?;
+        Ok(Self {
+            id,
+            writer,
+            bloom_header_size,
+            index_entries: Vec::new(),
+            bloom_filter,
+            application_ids: HashSet::new(),
+            min_key: None,
+            max_key: None,
+            num_entries: 0,
+            data_size_bytes: 0,
+        })
+    }
 
-        // Serialize and write bloom filter
-        let bloom_data = bincode::serialize(&self.bloom_filter)?;
-        let bloom_size = bloom_data.len() as u32;
-        writer.write_all(&bloom_size.to_le_bytes())?;
-        writer.write_all(&bloom_data)?;
-
-        // Write data blocks and build index
-        let data_start_offset = writer.stream_position()?;
-        let mut index_entries = Vec::new();
-
-        for (key, frame) in &self.entries {
-            let entry_offset = writer.stream_position()?;
-
-            // Serialize frame
-            let frame_data = bincode::serialize(frame)?;
-
-            // Compress with LZ4
-            let mut compressed = Vec::new();
-            {
-                let mut encoder = EncoderBuilder::new()
-                    .level(4)
-                    .build(&mut compressed)?;
-                encoder.write_all(&frame_data)?;
-                let (_, result) = encoder.finish();
-                result?;
+    /// Add an entry to the SSTable (must be added in sorted order).
+    /// Each entry is written to disk immediately — no full-dataset buffering.
+    pub fn add(&mut self, key: MemtableKey, frame: Frame) -> Result<()> {
+        // Verify sorted order
+        if let Some(ref last_key) = self.max_key {
+            if &key <= last_key {
+                return Err(LoraDbError::StorageError(
+                    "SSTable entries must be added in sorted order".into(),
+                )
+                .into());
             }
-
-            let compressed_size = compressed.len() as u32;
-
-            // Calculate checksum
-            let mut hasher = Hasher::new();
-            hasher.update(&compressed);
-            let checksum = hasher.finalize();
-
-            // Write: [compressed_size(4) | compressed_data(N) | checksum(4)]
-            writer.write_all(&compressed_size.to_le_bytes())?;
-            writer.write_all(&compressed)?;
-            writer.write_all(&checksum.to_le_bytes())?;
-
-            let entry_size = 4 + compressed_size + 4;
-
-            index_entries.push(IndexEntry {
-                key: key.clone(),
-                offset: entry_offset,
-                size: entry_size,
-            });
         }
 
-        let data_end_offset = writer.stream_position()?;
-        let data_size_bytes = data_end_offset - data_start_offset;
+        if self.min_key.is_none() {
+            self.min_key = Some(key.clone());
+        }
+
+        self.bloom_filter.insert(&key.dev_eui);
+
+        if let Some(app_id) = frame.application_id() {
+            self.application_ids.insert(app_id.as_str().to_string());
+        }
+
+        let entry_offset = self.writer.stream_position()?;
+
+        let frame_data = bincode::serialize(&frame)?;
+
+        let mut compressed = Vec::new();
+        {
+            let mut encoder = EncoderBuilder::new()
+                .level(4)
+                .build(&mut compressed)?;
+            encoder.write_all(&frame_data)?;
+            let (_, result) = encoder.finish();
+            result?;
+        }
+
+        let compressed_size = compressed.len() as u32;
+
+        let mut hasher = Hasher::new();
+        hasher.update(&compressed);
+        let checksum = hasher.finalize();
+
+        // Write: [compressed_size(4) | compressed_data(N) | checksum(4)]
+        self.writer.write_all(&compressed_size.to_le_bytes())?;
+        self.writer.write_all(&compressed)?;
+        self.writer.write_all(&checksum.to_le_bytes())?;
+
+        let entry_size = 4 + compressed_size + 4;
+
+        self.index_entries.push(IndexEntry {
+            key: key.clone(),
+            offset: entry_offset,
+            size: entry_size,
+        });
+
+        self.max_key = Some(key);
+        self.num_entries += 1;
+        self.data_size_bytes += entry_size as u64;
+
+        Ok(())
+    }
+
+    /// Finalize the SSTable: write index and footer, then seek back to write the real header.
+    pub fn finish(mut self) -> Result<SSTableMetadata> {
+        if self.num_entries == 0 {
+            return Err(LoraDbError::StorageError("Cannot write empty SSTable".into()).into());
+        }
+
+        let min_key = self.min_key.unwrap();
+        let max_key = self.max_key.unwrap();
 
         // Write index
-        let index_offset = writer.stream_position()?;
-        let index_count = index_entries.len() as u32;
-        writer.write_all(&index_count.to_le_bytes())?;
+        let index_offset = self.writer.stream_position()?;
+        let index_count = self.index_entries.len() as u32;
+        self.writer.write_all(&index_count.to_le_bytes())?;
 
-        for entry in &index_entries {
-            // Serialize key
+        for entry in &self.index_entries {
             let key_data = bincode::serialize(&entry.key)?;
             let key_size = key_data.len() as u32;
-            writer.write_all(&key_size.to_le_bytes())?;
-            writer.write_all(&key_data)?;
-            writer.write_all(&entry.offset.to_le_bytes())?;
-            writer.write_all(&entry.size.to_le_bytes())?;
+            self.writer.write_all(&key_size.to_le_bytes())?;
+            self.writer.write_all(&key_data)?;
+            self.writer.write_all(&entry.offset.to_le_bytes())?;
+            self.writer.write_all(&entry.size.to_le_bytes())?;
         }
 
-        let index_end_offset = writer.stream_position()?;
-
-        // Write footer with metadata
-        // Layout: min_key (size+data) | max_key (size+data) | created_at (8) | index_offset (8)
-        // This puts fixed-size data at the end for easy seeking
-
-        // Serialize min/max keys
+        // Write footer: min_key | max_key | created_at | index_offset
         let min_key_data = bincode::serialize(&min_key)?;
         let max_key_data = bincode::serialize(&max_key)?;
         let min_key_size = min_key_data.len() as u32;
         let max_key_size = max_key_data.len() as u32;
 
-        writer.write_all(&min_key_size.to_le_bytes())?;
-        writer.write_all(&min_key_data)?;
-        writer.write_all(&max_key_size.to_le_bytes())?;
-        writer.write_all(&max_key_data)?;
+        self.writer.write_all(&min_key_size.to_le_bytes())?;
+        self.writer.write_all(&min_key_data)?;
+        self.writer.write_all(&max_key_size.to_le_bytes())?;
+        self.writer.write_all(&max_key_data)?;
 
-        // Write fixed-size footer at end
         let created_at_micros = Utc::now().timestamp_micros();
-        writer.write_all(&created_at_micros.to_le_bytes())?;
-        writer.write_all(&index_offset.to_le_bytes())?;
+        self.writer.write_all(&created_at_micros.to_le_bytes())?;
+        self.writer.write_all(&index_offset.to_le_bytes())?;
 
-        writer.flush()?;
+        // into_inner() flushes the BufWriter and returns the underlying File
+        let mut file = self.writer
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("Failed to flush SSTable writer: {}", e.error()))?;
 
-        let compressed_size_bytes = index_end_offset - data_start_offset;
+        // Seek back to position 0 and overwrite the placeholder with the real header.
+        // The bloom filter's bit array is fixed-size (capacity and FP rate are constants),
+        // so its serialized size here always matches what was written in new().
+        file.seek(SeekFrom::Start(0))?;
+
+        let bloom_data = bincode::serialize(&self.bloom_filter)?;
+        debug_assert_eq!(
+            bloom_data.len() as u64,
+            self.bloom_header_size,
+            "Bloom filter serialized size changed between new() and finish()"
+        );
+
+        file.write_all(&SSTABLE_MAGIC.to_le_bytes())?;
+        file.write_all(&SSTABLE_VERSION.to_le_bytes())?;
+        file.write_all(&self.id.to_le_bytes())?;
+        file.write_all(&self.num_entries.to_le_bytes())?;
+        file.write_all(&(bloom_data.len() as u32).to_le_bytes())?;
+        file.write_all(&bloom_data)?;
+        file.flush()?;
 
         info!(
             "Wrote SSTable {} with {} entries, {} bytes (compressed: {})",
-            self.id, num_entries, data_size_bytes, compressed_size_bytes
+            self.id, self.num_entries, self.data_size_bytes, self.data_size_bytes
         );
 
         Ok(SSTableMetadata {
             id: self.id,
             created_at: DateTime::from_timestamp_micros(created_at_micros).unwrap(),
-            num_entries,
+            num_entries: self.num_entries,
             min_key,
             max_key,
             bloom_filter: self.bloom_filter,
-            data_size_bytes,
-            compressed_size_bytes,
+            data_size_bytes: self.data_size_bytes,
+            compressed_size_bytes: self.data_size_bytes,
             application_ids: self.application_ids,
         })
     }
@@ -241,6 +257,9 @@ pub struct SSTableReader {
     path: PathBuf,
     metadata: SSTableMetadata,
     index: Vec<IndexEntry>,
+    /// Lazily populated on first call to application_ids() for on-disk SSTables
+    /// that pre-date the application_ids metadata field.
+    app_ids_cache: Mutex<Option<HashSet<String>>>,
 }
 
 impl SSTableReader {
@@ -371,6 +390,7 @@ impl SSTableReader {
             path,
             metadata,
             index,
+            app_ids_cache: Mutex::new(None),
         })
     }
 
@@ -521,22 +541,27 @@ impl SSTableReader {
         DateTime::from_timestamp_micros(self.metadata.max_key.timestamp)
     }
 
-    /// Get all application IDs in this SSTable (for retention policy)
-    /// Scans the SSTable if not already populated in metadata
+    /// Get all application IDs in this SSTable (for retention policy).
+    /// Results are cached after the first scan so that repeated retention checks
+    /// do not re-read all frames from disk.
     pub fn application_ids(&self) -> Result<HashSet<String>> {
-        // If already populated (from new SSTables), return it
+        // Newly-written SSTables have application_ids populated at write time.
         if !self.metadata.application_ids.is_empty() {
             return Ok(self.metadata.application_ids.clone());
         }
 
-        // Otherwise, scan the SSTable to build the set
+        let mut cache = self.app_ids_cache.lock();
+        if let Some(ref ids) = *cache {
+            return Ok(ids.clone());
+        }
+
         let mut app_ids = HashSet::new();
         for frame in self.iter_all()? {
             if let Some(app_id) = frame.application_id() {
                 app_ids.insert(app_id.as_str().to_string());
             }
         }
-
+        *cache = Some(app_ids.clone());
         Ok(app_ids)
     }
 }
@@ -577,7 +602,7 @@ mod tests {
         let two_hours_ago = now - chrono::Duration::hours(2);
 
         // Write SSTable
-        let mut writer = SSTableWriter::new(1, temp_dir.path());
+        let mut writer = SSTableWriter::new(1, temp_dir.path()).unwrap();
 
         let key1 = MemtableKey::new(&dev_eui, two_hours_ago, 0);
         let key2 = MemtableKey::new(&dev_eui, one_hour_ago, 1);
@@ -621,7 +646,7 @@ mod tests {
         let now = Utc::now();
 
         // Write SSTable with only dev_eui1
-        let mut writer = SSTableWriter::new(1, temp_dir.path());
+        let mut writer = SSTableWriter::new(1, temp_dir.path()).unwrap();
         let key = MemtableKey::new(&dev_eui1, now, 0);
         writer
             .add(key, create_test_frame("0123456789ABCDEF", now))
@@ -635,6 +660,7 @@ mod tests {
         assert!(reader.might_contain(&dev_eui1));
         // dev_eui2 should not be present (but false positives are possible)
         // We can't assert !might_contain because of false positives
+        let _ = dev_eui2;
     }
 
     #[test]
@@ -645,7 +671,7 @@ mod tests {
         let now = Utc::now();
         let one_hour_ago = now - chrono::Duration::hours(1);
 
-        let mut writer = SSTableWriter::new(1, temp_dir.path());
+        let mut writer = SSTableWriter::new(1, temp_dir.path()).unwrap();
 
         let key1 = MemtableKey::new(&dev_eui, now, 0);
         let key2 = MemtableKey::new(&dev_eui, one_hour_ago, 1); // Out of order!

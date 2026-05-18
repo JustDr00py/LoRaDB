@@ -256,17 +256,16 @@ impl StorageEngine {
             compaction.allocate_sstable_id()
         };
 
-        // Create new SSTable writer
-        let mut writer = SSTableWriter::new(sstable_id, &self.data_dir);
+        // Create new SSTable writer and stream entries directly from the memtable.
+        // Holding the read lock during the write prevents a separate Vec allocation
+        // that would double peak memory usage during flush.
+        let mut writer = SSTableWriter::new(sstable_id, &self.data_dir)?;
 
-        // Copy all entries from memtable to SSTable
-        let entries: Vec<_> = {
+        {
             let memtable = self.memtable.read();
-            memtable.iter().collect()
-        };
-
-        for (key, frame) in entries {
-            writer.add(key, frame)?;
+            for (key, frame) in memtable.iter() {
+                writer.add(key, frame)?;
+            }
         }
 
         let metadata = writer.finish()?;
@@ -502,7 +501,20 @@ impl StorageEngine {
                     }
                 };
 
-                // Get all application IDs in this SSTable
+                // When there are no per-app policies, apply the global policy directly
+                // without reading application IDs from the SSTable (which requires iter_all()).
+                if policies.applications.is_empty() {
+                    if let Some(days) = policies.global_days {
+                        let cutoff_time = Utc::now() - chrono::Duration::days(days as i64);
+                        if max_time < cutoff_time {
+                            to_delete.push((sstable.id(), "global".to_string()));
+                        }
+                    }
+                    continue;
+                }
+
+                // Per-app policies exist — fetch application IDs for this SSTable.
+                // Results are cached in the reader after the first scan.
                 let app_ids = match sstable.application_ids() {
                     Ok(ids) => ids,
                     Err(e) => {
@@ -511,8 +523,8 @@ impl StorageEngine {
                     }
                 };
 
-                // Determine the SHORTEST retention period for this SSTable
-                // We can only delete if ALL applications in the SSTable are past retention
+                // Determine the SHORTEST retention period for this SSTable.
+                // We can only delete if ALL applications in the SSTable are past retention.
                 let mut shortest_retention: Option<u32> = None;
                 let mut policy_source = String::new();
 
@@ -536,10 +548,10 @@ impl StorageEngine {
                         policies.global_days
                     };
 
-                    // Track the shortest retention period
+                    // Track the longest retention period to be safe
                     if let Some(days) = retention_days {
                         shortest_retention = Some(match shortest_retention {
-                            Some(current) => current.max(days),  // Use longest to be safe
+                            Some(current) => current.max(days),
                             None => days,
                         });
                     }
@@ -671,7 +683,7 @@ impl StorageEngine {
                         compaction.allocate_sstable_id()
                     };
 
-                    let mut writer = SSTableWriter::new(new_id, &self.data_dir);
+                    let mut writer = SSTableWriter::new(new_id, &self.data_dir)?;
 
                     // Sort frames by key and write to new SSTable
                     let mut keyed_frames: Vec<_> = frames
