@@ -9,6 +9,7 @@ use crate::model::frames::Frame;
 use crate::model::lorawan::DevEui;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -64,6 +65,64 @@ impl StorageEngine {
         // Initialize compaction manager and open existing SSTables
         let mut compaction_manager =
             CompactionManager::new(data_dir.clone(), config.compaction_threshold);
+
+        // Batch compact at startup if too many SSTables exist to safely load into memory.
+        // Each SSTable holds a ~94KB bloom filter; 21K files would require ~2GB just for
+        // bloom filters before the server could answer a single query.
+        const STARTUP_OPEN_LIMIT: usize = 500;
+        const STARTUP_BATCH_SIZE: usize = 100;
+        {
+            let startup_paths = compaction_manager.find_sstables()?;
+            if startup_paths.len() > STARTUP_OPEN_LIMIT {
+                info!(
+                    "Found {} SSTables — running startup batch compaction (batch={}) before loading...",
+                    startup_paths.len(), STARTUP_BATCH_SIZE
+                );
+                let mut remaining = startup_paths;
+                let mut round = 0u32;
+                while remaining.len() > STARTUP_OPEN_LIMIT {
+                    round += 1;
+                    let batch_end = STARTUP_BATCH_SIZE.min(remaining.len());
+                    let batch: Vec<PathBuf> = remaining.drain(..batch_end).collect();
+                    let readers: Vec<SSTableReader> = match batch
+                        .iter()
+                        .map(|p| SSTableReader::open(p.clone()))
+                        .collect::<Result<Vec<_>>>()
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!("Startup compaction batch {} failed to open: {}", round, e);
+                            remaining.extend(batch);
+                            break;
+                        }
+                    };
+                    match compaction_manager.compact(readers) {
+                        Ok((meta, old_paths)) => {
+                            let new_path = data_dir.join(format!("sstable-{:08}.sst", meta.id));
+                            remaining.push(new_path);
+                            for p in old_paths {
+                                let _ = fs::remove_file(&p);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Startup compaction batch {} failed: {}", round, e);
+                            break;
+                        }
+                    }
+                    if round % 50 == 0 || remaining.len() <= STARTUP_OPEN_LIMIT {
+                        info!(
+                            "Startup compaction: round {}, {} SSTables remaining",
+                            round, remaining.len()
+                        );
+                    }
+                }
+                info!(
+                    "Startup compaction done: {} rounds, {} SSTables remaining",
+                    round, remaining.len()
+                );
+            }
+        }
+
         let sstables = compaction_manager.open_all_sstables()?;
 
         info!(
@@ -254,15 +313,22 @@ impl StorageEngine {
 
     /// Compact SSTables
     async fn compact(&self) -> Result<()> {
-        info!("Starting compaction");
-
-        // Collect SSTable paths (to reopen them in compaction)
-        let sstable_paths: Vec<_> = {
+        // Only compact the oldest `compaction_threshold` SSTables at a time.
+        // Compacting everything at once would load all frames into a BTreeMap and OOM.
+        let batch_size = {
             let sstables = self.sstables.read();
-            sstables.iter().map(|s| s.path().to_path_buf()).collect()
+            self.config.compaction_threshold.min(sstables.len())
         };
 
-        // Reopen SSTables for compaction
+        info!("Starting compaction of {} SSTables", batch_size);
+
+        // Collect only the oldest batch of paths
+        let sstable_paths: Vec<_> = {
+            let sstables = self.sstables.read();
+            sstables[..batch_size].iter().map(|s| s.path().to_path_buf()).collect()
+        };
+
+        // Reopen just the batch for compaction
         let old_sstables: Result<Vec<_>> = sstable_paths
             .into_iter()
             .map(SSTableReader::open)
@@ -281,10 +347,11 @@ impl StorageEngine {
             .join(format!("sstable-{:08}.sst", new_metadata.id));
         let new_reader = SSTableReader::open(new_sstable_path)?;
 
-        // Replace SSTables list with just the new one
+        // Replace only the compacted batch with the new merged SSTable
         {
             let mut sstables = self.sstables.write();
-            *sstables = vec![new_reader];
+            sstables.drain(..batch_size);
+            sstables.insert(0, new_reader);
         }
 
         // Delete old SSTables
@@ -293,7 +360,7 @@ impl StorageEngine {
             compaction.delete_old_sstables(old_paths)?;
         }
 
-        info!("Compaction complete");
+        info!("Compaction complete: {} SSTables remaining", self.sstables.read().len());
 
         Ok(())
     }
